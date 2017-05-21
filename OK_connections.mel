@@ -1,0 +1,644 @@
+//------------------------------------------------------------------------------------------------------------//
+//------------------------------------------------------------------------------------------------------------//
+//  SCRIPT: OK_hyperConnector.mel
+//  AUTHOR: Ofer Koren
+//          koreno@gmail.com
+//  DATE:       April 1, 2006
+//
+//  DESCRIPTION:    This library script contains various low-level procedures for manipulating connections
+//              between nodes.
+//
+//  This script requires OK_utils.mel
+//
+//
+//------------------------------------------------------------------------------------------------------------//
+//------------------------------------------------------------------------------------------------------------//
+
+
+source OK_utils.mel;
+
+global proc OK_connections() {
+    print(okListGlobalProcs("OK_connections"));
+    println("OK_connections loaded");
+}
+
+proc println(string $str) {
+    okPrintln("OK_connections: " + $str);
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Connect attribute through conversion...
+// * Use conversion==0 to create a 'reverse' conversion (1->0, 0->1)
+//--------------------------------------------------------------------------------------------------------*/
+global proc string okcnConnectAttrConvert(string $from, string $to, float $conversion) {
+    string $ret = "";
+
+    if (!objExists($from)) {
+        warning ("Source plug ("+$from+") does not exist; Aborting connection");
+    } else  if (!objExists($to)) {
+        warning ("Destination plug ("+$to+") does not exist; Aborting connection");
+    } else {
+        okMaintainSelection(0);
+        if ($conversion==0) {
+            string $rev = "rev_" + $to;
+            $rev  = `createNode reverse -n $rev`;
+            connectAttr -f $from ($rev+".inputX");
+            connectAttr -f ($rev+".outputX") $to;
+            $ret = $rev;
+        } else if ($conversion!=1) {
+            string $uc = "uc_" + (startString((string) $conversion,3));
+            $uc = substitute("\\.",$uc,"p");
+            $uc = substitute("-",$uc,"neg");
+            $uc = $uc + "_" + $to;
+            $uc = substitute("\\.",$uc,"_");
+
+            $uc = `createNode unitConversion -n $uc`;
+                setAttr ".conversionFactor" $conversion;
+            connectAttr -f $from ($uc+".input");
+            connectAttr -f ($uc+".output") $to;
+            $ret = $uc;
+        } else {
+            if (catchQuiet(`connectAttr -f $from $to`)) {
+                sprint("Failed  on (connectAttr -f % %)",{$from,$to});
+                if (catchQuiet(`connectAttr -f -na $from $to`)) {
+                    sprint("Failed  on (connectAttr -f -na % %)",{$from,$to});
+                    $idxBase = `getAttr -size $to`;
+                    $to += "["+$idxBase+"]";
+                    if (catchQuiet(`connectAttr -f $from $to`))
+                        sprint("Failed  on (connectAttr -f % %)",{$from,$to});
+                    else
+                        sprint("(connectAttr -f % %)",{$from,$to});
+                } else
+                    sprint("(connectAttr -f -na % %)",{$from,$to});
+            } else
+                sprint("(connectAttr -f % %)",{$from,$to});
+
+            $ret = "";
+        }
+        okMaintainSelection(1);
+    }
+    return $ret;
+}
+
+
+//--------------------------------------------------------------------------------------------------------
+// Apply connections
+// * In the case of MULTIPLE origin channels, must use same number of channels on the target,
+// and connections will be made 1-to-1 in same order they appear in the channel box.
+// * In the case of a SINGLE origin channel, all target channels will be connected to the same origin.
+// * see okcnConnectAttrConvert for notes about conversion ratio and reversing values
+//--------------------------------------------------------------------------------------------------------
+global proc int okcnConnectConvert(string $sChans[], string $tChans[], float $conversion) {
+
+
+    println "sChans:"; print $sChans;
+    println "tChans:"; print $tChans;
+
+    string $msg;
+    string $result;
+    int $i=0; int $j=0;
+    int $sCount = size($sChans);
+    int $tCount = size($tChans);
+
+    if ($tCount==1 && $sCount>1) {
+        string $chn = $tChans[0];
+        if (`attributeQuery -n (okGetObjFromChannel($chn)) -m (okGetAttrFromChannel($chn))`) {
+            $idxBase = `getAttr -size $chn`;
+            for ($i=0; $i<size($sChans); $i++) {
+                if ($sChans[$i]!="") {
+                    okcnConnectAttrConvert $sChans[$i] ($chn+"["+($idxBase+$i)+"]") $conversion;
+                    sprint("Connected: % -[%]-> %",{$sChans[$i],$conversion,($chn+"["+($idxBase+$i)+"]")});
+                }
+            }
+        }
+    } else if ($tCount%$sCount!=0)
+        error(sprintf("Number of source channels does not correspond with the number of target channels (%:%)",{(string)$sCount,(string)$tCount}));
+    else for ($i=0; $i<size($tChans); $i++) {
+        okcnConnectAttrConvert $sChans[$i%$sCount] $tChans[$i] $conversion;
+        sprint("Connected: % -[%]-> %",{$sChans[$i%$sCount],$conversion,$tChans[$i]});
+    }
+    return $i;
+}
+
+//--------------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------------
+global proc okcnCreateCurveControl (string $controlChannel, string $destinationChannels[]) {
+
+    okMaintainSelection 0;
+
+    $numControls = size($destinationChannels);
+    setKeyframe -t 1 -v 0 $controlChannel;
+    setKeyframe -t  $numControls -v 0 $controlChannel;
+
+    keyTangent -wt 1 $controlChannel;
+    keyTangent -weightLock off $controlChannel;
+
+    keyTangent -e -a -t 1 -outAngle 50 $controlChannel;
+    keyTangent -e -a -t $numControls -inAngle -50 $controlChannel;
+
+    // next, we'll create frameCache nodes for each object, and attach them to the object's attribute
+    for ($x = 0; $x < $numControls; $x++)
+    {
+        // create the frameCache node
+        string $fc = `createNode frameCache -n ("utl_" + $destinationChannels[$x] + "_frameCache")`;
+
+        // connect the attribute
+        connectAttr $controlChannel ($fc + ".stream");
+
+        // set the frame
+        setAttr ($fc + ".vt") ($x+1);
+
+        // connect the output
+        connectAttr -f ($fc + ".v") $destinationChannels[$x];
+        sprint("Connected: % -[%]-> %",{$controlChannel,$fc,($destinationChannels[$x])});
+    }
+
+    okMaintainSelection 1;
+}
+
+//--------------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------------
+global proc int okcnCurveConnect(string $sChans[], string $tChans[]) {
+
+
+    println "sChans:"; print $sChans;
+    println "tChans:"; print $tChans;
+
+    string $msg;
+    string $result;
+
+    int $sCount = size($sChans);
+    int $tCount = size($tChans);
+
+    if ($sCount>1 || $tCount==1)
+        error(sprintf("Number of Source channels count exceeds number of target channels (%:%)",{(string)$sCount,(string)$tCount}));
+//    else if ($tCount%$sCount!=0)
+//        error(sprintf("Number of source channels does not correspond with the number of target channels (%:%)",{(string)$sCount,(string)$tCount}));
+    else {
+        okcnCreateCurveControl $sChans[0] $tChans;
+        return 1;
+    }
+
+    return 0;
+}
+
+
+//--------------------------------------------------------------------------------------------------------
+// Creates a connection whereby the current source-channel value evaulates to 1 on the target-channel (good for scaling)
+//--------------------------------------------------------------------------------------------------------
+global proc int okcnConnectScalers(string $sChans[], string $tChans[]) {
+
+    int $i=0;
+
+    if (size($sChans)==1) {
+            string $src = $sChans[0];
+            string $a; int $first=1;
+            string $convNode;
+            float $ratio = (1/`getAttr $src`);
+            for ($a in $tChans) {
+                if ($first) {
+                    $convNode = okcnConnectAttrConvert($src,$a,$ratio);
+                    $convNode = `rename $convNode ($src+"_scaler")`;
+                    $first=0;
+                } else {
+                    connectAttr ($convNode+".output") $a;
+                }
+                sprint("Connected: % --[%]--> %",{$src,$ratio,$a});
+                $i++;
+            }
+    } else {
+
+        if (size($sChans)!=size($tChans))
+            error("Number of target channels does not match number of origin channels");
+
+        for ($i=0; $i<size($tChans); $i++) {
+            float $ratio = (1/`getAttr $sChans[$i]`);
+            okcnConnectAttrConvert $sChans[$i] $tChans[$i] $ratio;
+            sprint("Connected: % -[%]-> %",{$sChans[$i],$ratio,$tChans[$i]});
+        }
+    }
+    return $i;
+}
+
+
+//--------------------------------------------------------------------------------------------------------
+// Combine channels through a mathematical operation (add, subtract, average, blend, multiply, divide, power)
+// When more than one target is specified, respective channels will be combined:
+// a1,a2,b1,b2... -> t1,t2...  =>  (a1+b1)->t1, (a2+b2)->t2, ...
+// UNLESS $sequential is specified, and then:
+// a1,a2,b1,b2... -> t1,t2...  =>  (a1+a2)->t1, (b1+b2)->t2, ...
+// This means the number of source channels must be a multiple of the number of target channels
+//--------------------------------------------------------------------------------------------------------
+global proc string[] okcnCombineChannels(string $sChans[], string $tChans[], string $oper, int $sequential) {
+    return okcnCombineChannelsOrValue($sChans,$tChans,$oper,$sequential,0,0);
+}
+
+global proc string[] okcnCombineChannelsOrValue(string $sChans[], string $tChans[], string $oper, int $sequential, int $useValue, float $value) {
+
+
+    okMaintainSelection(0);  // Calling createNode will change the selection, so this will keep it until done
+
+    string $calcNodes[];
+    string $calcNode;
+    int $sCount = size($sChans);
+    int $tCount = size($tChans);
+    string $in; string $out; int $offset=1;
+
+    if ($sCount%$tCount!=0)
+        error(sprintf("Number of source channels does not correspond with the number of target channels (%:%)",{(string)$sCount,(string)$tCount}));
+
+    if ($useValue) {
+        $sCount += $tCount;       // Each target chan has an extra incoming channel
+    }
+
+    int $j=0, $i=0, $k=0, $idx=0, $cycle = $sCount / $tCount;
+    for ($j=0;$j<$tCount;$j++) {
+        string $type = `getAttr -type ($tChans[$j])`;
+        string $dim = endString($type,1);
+        string $niceName = substitute("\\.",$tChans[$j],"_");
+
+        switch ($dim) {
+            case "2" : $dim = "2D"; break;
+            case "3" : $dim = "3D"; break;
+            default  : $dim = "1D"; break;
+        }
+
+        if ($useValue && ($dim!="1D"))
+            error "Target channel is incompatible for this operation";
+
+        switch ($oper) {
+
+        // Binary Operations - two inputs
+            case "blend" :
+                if ($sCount/$tCount==2) {
+                    $calcNode = `createNode blendColors -n ("utl_blend_"+$niceName)`;
+                    if ($dim=="1D") {
+                        $in = "color%R"; $out = "outputR";
+                    } else if ($dim=="3D") {
+                        $in = "color%"; $out = "output";
+                    } else if ($dim=="2D") {
+                        error "Target channel is incompatible for this operation";
+                    }
+                } else
+                    error "Too many inputs for a blend operation";
+                break;
+
+            case "multiply" :
+                if ($sCount/$tCount==2) {
+                    if ($dim=="1D") {
+                        $calcNode = `createNode multDoubleLinear -n ("utl_mult_"+$niceName)`;
+                        $in = "input%"; $out = "output";
+                    } else {
+                        $calcNode = `createNode multiplyDivide -n ("utl_multD_"+$niceName)`;
+                        setAttr .op 1;
+                        if ($dim=="3D") {
+                            $in = "input%"; $out = "output";
+                        } else if ($dim=="2D") {
+                            error "Target channel is incompatible for this operation";
+                        }
+                    }
+                } else
+                    error "Too many inputs for a multiply operation";
+                break;
+
+            case "divide"   :
+                if ($sCount/$tCount==2) {
+                    $calcNode = `createNode multiplyDivide -n ("utl_multD_"+$niceName)`;
+                    setAttr .op 2;
+                    if ($dim=="1D") {
+                        $in = "input%X"; $out = "outputX";
+                    } else if ($dim=="3D") {
+                        $in = "input%"; $out = "output";
+                    } else if ($dim=="2D") {
+                        error "Target channel is incompatible for this operation";
+                    }
+                } else
+                    error "Too many inputs for a divide operation";
+                break;
+
+            case "power"    :
+                if ($sCount/$tCount==2) {
+                    $calcNode = `createNode multiplyDivide -n ("utl_multD_"+$niceName)`;
+                    setAttr .op 3;
+                    if ($dim=="1D") {
+                        $in = "input%X"; $out = "outputX";
+                    } else if ($dim=="3D") {
+                        $in = "input%"; $out = "output";
+                    } else if ($dim=="2D") {
+                        error "Target channel is incompatible for this operation";
+                    }
+                } else
+                    error "Too many inputs for a power operation";
+                break;
+
+        // Aggregate Operations - two inputs
+            case "add"      :
+                if (($dim=="1D") && ($sCount/$tCount==2)) {
+                    $calcNode = `createNode addDoubleLinear -n ("utl_addD_"+$niceName)`;
+                    $in = "input%"; $out = "output";
+                } else {
+                    $calcNode = `createNode plusMinusAverage -n ("utl_plus_"+$niceName)`;
+                    setAttr .op 1;
+                    $in = "input"+$dim+"[%]"; $out = "output"+$dim;
+                    $offset = 0;
+                }
+                break;
+
+            case "subtract" :
+                $calcNode = `createNode plusMinusAverage -n ("utl_plus_"+$niceName)`;
+                setAttr .op 2;
+                $in = "input"+$dim+"[%]"; $out = "output"+$dim;
+                $offset = 0;
+                break;
+
+            case "average"  :
+                $calcNode = `createNode plusMinusAverage -n ("utl_plus_"+$niceName)`;
+                setAttr .op 3;
+                $in = "input"+$dim+"[%]"; $out = "output"+$dim;
+                $offset = 0;
+                break;
+
+            case "choice"   :
+                $calcNode = `createNode choice -n ("utl_choice_"+$niceName)`;
+                $in = "input[%]"; $out = "output";
+                $offset = 0;
+                break;
+
+            default   :
+                error ("Invalid operation specified (" + $oper + ")");
+        }
+
+        for ($i=0; $i<$cycle; $i++) {
+
+            if ($sequential) {      // Sequential Sorting (a,b,A,B -> ab, AB)
+                $k = $j*$cycle + $i;
+                $idx = $k - ($k/$cycle) + ($useValue-1)-1;
+            } else {                // Respective Sorting   (a,b,A,B -> aA, bB)
+                $k = $i*$tCount + $j;
+                $idx = $k - (2-$useValue)*$tCount;
+            }
+
+            string $t = ($calcNode +"."+ sprintf($in,{(string)($i+$offset)}));
+
+            if ($useValue)
+                if ($i%$cycle==($useValue-1)*($cycle-1)) {    // Check if index is even or odd against the $useValue method
+                    eval(sprintf("setAttr % %",{$t,(string)$value})); // Use Value
+                    sprint ("Value Set: % -> %",{(string)$value,$t});
+                } else {
+                    connectAttr -f $sChans[$idx] $t;                  // Use Channel
+                    sprint ("Connected: % -> %",{$sChans[$idx],$t});
+                }
+            else {
+                connectAttr -f $sChans[$k] $t;                  // By Channel Connection
+                sprint ("Connected: % -> %",{$sChans[$k],$t});
+            }
+
+        }
+        connectAttr -f ($calcNode+"."+$out) $tChans[$j];
+        sprint ("Connected: % -> %\n",{($calcNode+"."+$out),$tChans[$j]});
+
+        $calcNodes[size($calcNodes)] = $calcNode;
+    }
+
+    okMaintainSelection(1);
+
+    return $calcNodes;
+}
+
+
+
+
+
+
+
+//--------------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------------
+
+
+
+
+//--------------------------------------------------------------------------------------------------------
+// check if attribute is of a compound type
+// for compound attributes, only the parent attribute is required. children attrs will be queried
+//--------------------------------------------------------------------------------------------------------
+proc int okcnIsCompoundType(string $attr) {
+    string $t = `addAttr -q -attributeType ($attr)`;
+
+    if (($t == "reflectance") || ($t == "spectrum") || ($t == "float2") || ($t == "float3") ||
+        ($t == "double2") || ($t == "double3") || ($t == "long2") || ($t == "long3") ||
+        ($t == "short2") || ($t == "short3") || ($t == "compound"))
+        return 1;
+    else
+        return 0;
+}
+
+//--------------------------------------------------------------------------------------------------------
+// copy attribute to a target node
+// for compound attributes, only the parent attribute is required. children attrs will be queried
+//--------------------------------------------------------------------------------------------------------
+global proc okcnCopyAttrFromTo(string $from, string $to, string $attr, string $newName) {
+
+    if (!`objExists $from`)
+        error "Source object specified incorrectly. Try again.";
+
+    //Report error if attribute already exists on target obj. Do this BEFORE transferring anything.
+    if (`attributeExists $attr $to` && ($newName==""))
+        error ("Attribute \"" + $attr + "\" conflicts with name of existing attribute on target " + $to + ". Try again.");
+
+    string $attrFrom = ($from + "." + $attr);
+    string $attrTo = ($to + "." + $attr);
+    if ($newName!="") {
+        $attrTo = ($to + "." + $newName);
+    }
+
+    string $parent = okGetFirst(`attributeQuery -lp -n $from $attr`);
+
+    if ($parent==$attr || $newName!="") $parent = "";
+
+    string $longName;
+    string $shortName;
+
+    string $type = `getAttr -type $attrFrom`;
+    int $isStatic = !okIsDynamic($attrFrom);
+    if ($newName=="") {
+        if ($isStatic) {
+            $longName = okGetAttrFromChannel(okGetFirst(`ls $attrFrom`));
+            $shortName = $attr;
+        } else {
+            $longName = `addAttr -q -longName $attrFrom`;
+            $shortName = `addAttr -q -shortName $attrFrom`;
+        }
+    }  else {
+        $longName = $newName;
+        $shortName = $newName;
+    }
+
+    string $children[] = `attributeQuery -lc -n $from $attr`;
+    int $numberOfChildren = size($children);
+    int $isCompoundType = $numberOfChildren>0;
+
+    int $keyable = `getAttr -keyable $attrFrom`;
+    int $locked = `getAttr -lock $attrFrom`;
+
+
+    int $hasMin; int $hasMax; float $minValue; float $maxValue; int $hasSoftMin;
+    int $hasSoftMax; float $softMinValue; float $softMaxValue;
+    if ((!$isStatic) && ($type != "typed") && ($type != "message") && ($type != "fltMatrix") && ($type != "matrix") && (! $isCompoundType)) {
+        $hasMin = `addAttr -q -hasMinValue $attrFrom`;
+        $hasMax = `addAttr -q -hasMaxValue $attrFrom`;
+        $minValue = `addAttr -q -minValue $attrFrom`;
+        $maxValue = `addAttr -q -maxValue $attrFrom`;
+        $hasSoftMin = `addAttr -q -hasSoftMinValue $attrFrom`;
+        $hasSoftMax = `addAttr -q -hasSoftMaxValue $attrFrom`;
+        $softMinValue = `addAttr -q -softMinValue $attrFrom`;
+        $softMaxValue = `addAttr -q -softMaxValue $attrFrom`;
+    } else if ($isStatic) {
+        $hasMin = `attributeQuery -n $from -re $attr`;
+        $hasMax = $hasMin;
+        $hasSoftMin = $hasMin;
+        $hasSoftMax = $hasMin;
+        if ($hasMax) {
+            $res = `attributeQuery -n $from -r $attr`;
+            $minValue = $res[0];
+            $maxValue = $res[1];
+            $softMinValue = $res[0];
+            $softMaxValue = $res[1];
+       }
+    }
+
+
+    //Find out if the attribute is a string attribute.
+    int $isString = 0;
+    string $typedDataType[]; //For some reason querying "-dataType" returns an array (while "-attributeType" returns a string).
+    if ($type == "typed") {
+        $typedDataType = `addAttr -q -dataType $attrFrom`;
+        if ($typedDataType[0] == "string")
+            $isString = 1;
+    }
+
+    //Find out if the attribute is a multi attribute.
+    int $isMulti = `attributeQuery -n $from -multi $attr`;
+    int $multiSize = `getAttr -size $attrFrom`;
+    int $indexMatters;
+    if (!$isStatic) {$indexMatters = `addAttr -q -indexMatters $attrFrom`;}
+
+    //Get the -enumName value if the attribute is an "enum" type.
+    string $enumName;
+    if ($type == "enum")
+        $enumName = `addAttr -q -enumName $attrFrom`;
+
+    //ADD THE ATTR
+    //We need special cases for "enum" type, "string" type, and for multi attributes.
+    string $addAttrString = "addAttr";
+    if ($parent!="" && (`attributeExists $parent $to`))
+        $addAttrString += " -parent "+$parent;
+    else
+        $addAttrString += " -numberOfChildren "+$numberOfChildren;
+
+    if (!$isMulti) {                   //not multi attributes
+        if ($type != "enum") {          //not enum attributes.
+            if (! $isString) {          //not string attributes.
+                 $addAttrString += " -keyable "+$keyable;
+                 if(!$isStatic)
+                    $addAttrString += " -attributeType \""+$type+"\"";
+            } else {                   //is string
+                //Note: attributes using the "-dataType" flag cannot use the -numberOfChildren flag
+                $addAttrString += " -dataType \"string\"";
+            }
+        } else {                       // is enum
+             $addAttrString += " -keyable "+$keyable+" -attributeType \"enum\" -enumName \""+$enumName+"\"";
+        }
+    } else if ($isMulti) {             // is multi
+        $addAttrString += " -keyable "+$keyable+" -attributeType \""+$type+"\" -m -indexMatters "+$indexMatters;
+    }
+
+    $addAttrString = $addAttrString + " -longName " + $longName + " -shortName " + $shortName + " " + $to;
+
+    println("evaluating: "+$addAttrString);
+    eval($addAttrString);
+
+    //Now, after transferring the attr: if the attr is a compound type, transfer all its children before continuing.
+    //This is a recursive part because we are calling this same procedure for each child.
+    if ($isCompoundType) {
+        for ($c in $children)
+            okcnCopyAttrFromTo($from,$to,$c,"");
+    }
+
+    if ($parent=="") {
+        // Quick way to copy the value - connect the attributes and then disconnect
+        connectAttr -f $attrFrom $attrTo;
+        disconnectAttr $attrFrom $attrTo;
+    }
+
+    //Edit attribute accordingly. Attributes of type "typed" are string attributes and do not have min-max ranges.
+    if (($isStatic) || (($type != "typed") && ($type != "message") && ($type != "fltMatrix") && ($type != "matrix") && (! $isCompoundType))) {
+        if ($hasMin)
+            addAttr -e -minValue $minValue ($attrTo);
+        if ($hasMax)
+            addAttr -e -maxValue $maxValue ($attrTo);
+        if ($hasSoftMin)
+            addAttr -e -softMinValue $softMinValue ($attrTo);
+        if ($hasSoftMax)
+            addAttr -e -softMaxValue $softMaxValue ($attrTo);
+    }
+
+    if ($locked)
+        setAttr -lock 1 ($attrTo);
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Copy channels to target object(s) and connect the new attribute into the old ones.
+//--------------------------------------------------------------------------------------------------------
+global proc okcnCopyAttrs(string $attrs[], string $tObjs[], int $connect) {
+
+    if (size($tObjs)>1 && (size($attrs)%size($tObjs))!=0)
+        error("Number of attributes does not correspond to the number of target objects");
+
+    int $i;
+    for ($i=0; $i<size($tObjs); ++$i) {
+         string $tObj = $tObjs[$i];
+
+        int $j;
+        for ($j=0;$j<(size($attrs)/size($tObjs)); ++$j) {
+            string $chan = $attrs[$i*(size($attrs)/size($tObjs)) + $j];
+
+            string $sObj = okGetObjFromChannel($chan);
+            string $attr = okGetAttrFromChannel($chan);
+            string $name = "";
+            if (`attributeExists $attr $tObj`) {
+                $name = (okGetObjName($sObj)) + "_" + $attr;
+            }
+            okcnCopyAttrFromTo $sObj $tObj $attr $name;
+            if ($name!="")
+                $attr = $name;
+            if ($connect)
+                if (catch(`connectAttr ($tObj+"."+$attr) $chan`))
+                    warning ("Connection failed on " + $chan);
+        }
+    }
+
+/*
+    string $c;
+    int $i = 0;
+    if (size($tObjs)>1 && size($attrs)!=size($tObjs))
+        warning("Number of attributes does not correspond to the number of target objects");
+    for ($c in $attrs) {
+        string $sObj = okGetObjFromChannel($c);
+        string $attr = okGetAttrFromChannel($c);
+        string $name = "";
+        string $tObj = $tObjs[$i];
+        if (`attributeExists $attr $tObj`) {
+            $name = $sObj + "_" + $attr;
+        }
+        okcnCopyAttrFromTo $sObj $tObj $attr $name;
+        if ($name!="")
+            $attr = $name;
+        if ($connect)
+            if (catch(`connectAttr ($tObj+"."+$attr) $c`))
+                warning ($c+" has an incoming connection - Connection failed");
+        $i = ($i+1)%(size($tObjs));
+    }
+*/
+}

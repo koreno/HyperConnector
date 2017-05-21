@@ -1,0 +1,200 @@
+//------------------------------------------------------------------------------------------------------------//
+//------------------------------------------------------------------------------------------------------------//
+//  SCRIPT: OK_connections.mel
+//  AUTHOR: Ofer Koren
+//          koreno@gmail.com
+//  DATE:       April 1, 2006
+//
+//  DESCRIPTION:    This is a library script that provides several procedures for manipulating 
+//              connections between nodes.
+//
+//  This script requires OK_utils.mel
+//
+//          
+//------------------------------------------------------------------------------------------------------------//    
+//------------------------------------------------------------------------------------------------------------//
+
+source OK_utils.mel;
+
+global proc OK_manageConnections() {
+    print(okListGlobalProcs("OK_manageConnections"));
+    println("OK_manageConnections loaded");
+}
+
+proc println(string $s) {
+    okPrintln("OK_manageConnections: " + $s);
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Copy connections to and from, from the first object to the second object. Missing attributes will get created.
+//--------------------------------------------------------------------------------------------------------
+global proc string okCopyConnections() {
+        string $res[] = `ls -sl`;
+        return okCopyAllConnectionsFromTo($res[0],$res[1],"",1,1);
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Copy connections to and from the $from objects to the $to. Missing attributes will get created.
+//--------------------------------------------------------------------------------------------------------
+global proc string okCopyAllConnectionsFromTo (string $from, string $to, string $type, int $s, int $d) {
+    string $arrs[] = `listConnections -p true -c true -type $type -s $s -d $d $from`;
+    int $i = 0;
+    for ($i=0; $i<size($arrs); $i+=2) {
+        string $plgO=$arrs[$i];
+        string $plgB=$arrs[$i+1];
+        $plgA = $to+"."+(okGetAttrFromChannel($plgO));
+        if (!`attributeExists (okGetAttrFromChannel($plgO)) $to`) {
+            string $parent = `addAttr -q -parent $plgO`;
+            // if there's no parent, $parent will contain the original attribute name, so we can use it instead
+            okcnCopyAttrFromTo($from, $to, $parent, $parent);
+        }
+            
+        if (`connectionInfo -id $plgB`) {
+            int $l = `getAttr -l $plgB`;
+            setAttr -l 0 $plgB;
+            if (catch(`connectAttr -f $plgA $plgB`)) {
+				sprint("FAILED: %  --> %",{$plgA,$plgB});
+			} else {
+            	sprint("Connected: %  --> %",{$plgA,$plgB});
+			}
+			setAttr -l $l $plgB;
+		} else {
+            int $l = `getAttr -l $plgB`;
+            setAttr -l 0 $plgA;
+            if (catch(`connectAttr -f $plgB $plgA`))
+				sprint("FAILED: % <--  %",{$plgA,$plgB});
+			else
+				sprint("Connected: % <--  %",{$plgA,$plgB});
+	         setAttr -l $l $plgA;
+       }
+    }
+    sprint("%Copied % connections from % to %",{"",$i/2,$from,$to});
+    return ($i/2);    
+}
+
+//--------------------------------------------------------------------------------------------------------
+// list connections on selected objects in a 'from-->to' pair format
+//--------------------------------------------------------------------------------------------------------
+global proc string[] okListConnections(string $objs[]) {
+	return (okListFlaggedConnections($objs,""));
+}
+
+global proc string[] okListFlaggedConnections(string $objs[],string $flags) {
+    
+    string $hash[]; string $list[]; string $buf[];
+    string $plgA; string $plgB; string $t;
+    int $i;
+	
+	okMaintainSelection 0;
+	select $objs;
+    string $arrs[] = eval("listConnections -p true -c true " + $flags);
+	okMaintainSelection 1;
+	
+    for ($i=0; $i<size($arrs); $i+=2) {
+        $plgA = $arrs[$i];
+        $plgB = $arrs[$i+1];
+        // get Source
+        if(!`isConnected $plgA $plgB`) {
+            $plgB = $arrs[$i];
+            $plgA = $arrs[$i+1];
+            if(!`isConnected $plgA $plgB`)
+                error "??";
+        }
+        $plgA = `connectionInfo -ges $plgA`;
+        $t = $plgA+">"+$plgB;
+        if (stringArrayCount($t,$hash)==0) {
+            $hash[size($hash)] = $t;
+            $list[size($list)] = $plgA;
+            $list[size($list)] = $plgB;
+        }
+    }
+
+    return $list;
+}
+
+//--------------------------------------------------------------------------------------------------------
+// print connection list of current objects
+//--------------------------------------------------------------------------------------------------------
+global proc okPrintConnectionsList() {
+	print (okFormatConnectionsList(`ls -sl`,"","% -> %;"));
+}
+
+//--------------------------------------------------------------------------------------------------------
+// print connection list of current objects as MEL commands
+//--------------------------------------------------------------------------------------------------------
+global proc okPrintConnectionsScript() {
+	print (okFormatConnectionsList(`ls -sl`,"","connectAttr -f % %;"));
+}
+
+global proc string[] okFormatConnectionsList(string $objs[],string $flags,string $format) {
+    string $arrs[] = okListFlaggedConnections($objs,$flags);
+    string $list[];
+    int $i = 0;
+    for ($i=0; $i<size($arrs); $i+=2) {
+        string $plgA=$arrs[$i];
+        string $plgB=$arrs[$i+1];
+        $list[size($list)] = sprintf($format,{$plgA,$plgB});
+    }
+    $list = `sort $list`;
+    return $list;
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Unhide any channels in selected objects that are involved in any connection
+//--------------------------------------------------------------------------------------------------------
+global proc okUnhideConnectedChannels() {
+    $cons = `listConnections -p 1 -c 1`;
+    for ($i=0; $i<size($cons); $i+=2) {
+        setAttr -k 1 -cb 1 ($cons[$i]);
+    }
+}
+
+
+//--------------------------------------------------------------------------------------------------------
+// Create a message-type connection FROM the <<FIRST>> object to all the other selected objects
+//--------------------------------------------------------------------------------------------------------
+global proc okMessageConnectFrom() {
+    
+    if (size(`ls -sl`)<2)
+        error "Select at least two nodes to connect";
+        
+
+    string $src = okGetObj();
+    select -d $src;
+    string $buf[];
+    tokenize $src "|" $buf;
+    string $srcName = okGetLast($buf);
+
+    string $o = okGetObj();
+    for ($o in `ls -sl`) {
+        okConnectMessage($src,$o,("msg_" + $srcName));
+    }
+    
+    select -add $src;
+}    
+
+//--------------------------------------------------------------------------------------------------------
+// Create a message-type connection TO the >>FIRST<< object from all the other selected objects
+//--------------------------------------------------------------------------------------------------------
+global proc okMessageConnectTo() {
+    
+    if (size(`ls -sl`)<2)
+        error "Select at least two nodes to connect";
+        
+    string $buf[];
+
+    string $dest = okGetObj();
+    select -d $dest;
+    string $o = okGetObj();
+    for ($o in `ls -sl`) {
+        tokenize $o "|" $buf;
+        string $oName = okGetLast($buf);
+        okConnectMessage($o,$dest,("msg_" + $oName));
+    }
+    
+    select -add $dest;
+}    
+
+
+//--------------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------------

@@ -1,0 +1,984 @@
+//------------------------------------------------------------------------------------------------------------//
+//------------------------------------------------------------------------------------------------------------//
+//  SCRIPT: OK_utils.mel
+//  AUTHOR: Ofer Koren
+//          koreno@gmail.com
+//  DATE:       April 1, 2006
+//
+//  DESCRIPTION:    Miscellaneous MEL-scripting and Rigging helper functions and procedures.
+//
+//
+//------------------------------------------------------------------------------------------------------------//
+//------------------------------------------------------------------------------------------------------------//
+
+
+global proc OK_utils() {
+    print(okListGlobalProcs("OK_utils"));
+    println("OK_utils loaded");
+}
+
+// mathematical PI
+global proc float PI() { return (deg_to_rad(180)); }
+
+// truncates to specified decimals
+global proc float okTruncDigits(float $f,int $d) { return (trunc($f*pow(10,$d))/pow(10,$d)); }
+
+// current time
+global proc string okGetTime() { return (startString(system("date /t"),14) + " " + startString(system("time /t"),8)); }
+
+// print and skip a line
+global proc okPrintln(string $s) { print ("// " + $s + "\n"); }
+global proc println(string $s) { okPrintln($s); }
+
+// print formatted string
+global proc sprint(string $s, string $values[]) { println(sprintf($s,$values)); }
+
+// convert vector from array type to vector type
+global proc vector okToVector(float $v[]) { return <<$v[0],$v[1],$v[2]>>; }
+
+// convert vector from array type to vector type
+global proc float[] okToArray(vector $v) { return {($v.x),($v.y),($v.z)}; }
+
+// get first object in current selection
+global proc string okGetObj() { return okGetFirst(`ls -sl -fl`); }
+
+// create a simple prompt box for user input
+global proc string okPrompt(string $msg, string $def, string $cancelString) {
+    string $result = `promptDialog -text $def -message $msg -button "Ok" -button "Cancel"
+                        -defaultButton "Ok" -cancelButton "Cancel" -dismissString "Cancel"`;
+    if ($result == "Ok")
+        return (`promptDialog -query -text`);
+    else
+        return $cancelString;
+}
+
+// create a simple confirm box
+global proc int okConfirm(string $title, string $confirm) {
+    string $result = `confirmDialog -title $title -message $confirm
+                        -button "Yes" -button "No" -defaultButton "No" -ma "center"
+                        -cancelButton "No" -dismissString "No"`;
+    return ($result=="Yes");
+}
+
+// create a simple message box
+global proc okMessageBox(string $title, string $msg) {
+    string $result = `confirmDialog -title $title -message $msg
+                        -button "Ok" -defaultButton "Ok" -ma "center"`;
+}
+
+
+	
+// in debug mode, allows breaking out of the code
+global proc okSetDebugLevel(int $level) {
+	if ($level==0)
+		optionVar -rm "okDebugLevel";
+	else 
+		optionVar -iv "okDebugLevel" $level;
+	println("Debug Level: " + $level);
+}
+
+// in debug mode, allows breaking out of the code
+global proc okConfirmContinue(string $msg) {
+	if (`optionVar -q "okDebugLevel"` && !okConfirm("Debugger",$msg+"\nContinue Code Execution?")) {
+		trace -w "okConfirmContinue: User has requested to halt code execution";
+		error "okConfirmContinue: User has requested to halt code execution";
+	}
+}
+
+
+
+//--------------------------------------------------------------------------------------------------------*/
+// c++ style formatted string. Use '%' sign to place values
+//--------------------------------------------------------------------------------------------------------*/
+global proc string sprintf(string $s, string $values[]) {
+    string $res = $s;
+    string $v;
+    for ($v in $values) {
+        $res = substitute("%",$res,$v);
+    }
+    return $res;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+//
+//--------------------------------------------------------------------------------------------------------*/
+global proc string[] okStringArrayMatch(string $match, string $arr[]) {
+
+    string $t;
+    string $ret[];
+    for ($t in $arr)
+        if (size(match($match,$t)))
+            $ret[size($ret)] = $t;
+    return $ret;
+
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+//
+//--------------------------------------------------------------------------------------------------------*/
+global proc string[] okStringArrayIntersect(string $arr1[], string $arr2[]) {
+
+ 	string $myIntersector = `stringArrayIntersector`;
+ 	stringArrayIntersector -edit -intersect $arr1 $myIntersector;
+	stringArrayIntersector -edit -intersect $arr2 $myIntersector;
+	string $ret[] = `stringArrayIntersector -query $myIntersector`;
+	deleteUI $myIntersector;
+    return $ret;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+//
+//--------------------------------------------------------------------------------------------------------*/
+global proc string[] okStringArrayFilter(string $regEx[], string $arr[], int $invert, int $apply) {
+
+	string $ret[];
+	string $s, $re, $match;
+	for ($s in $arr) {
+		for ($re in $regEx) {
+			$match = match($re,$s);
+			if (size($match))
+				break;
+		}
+		if ((!$invert)==(size($match)>0))
+			$ret[size($ret)] = ($apply && !$invert ? $match : $s);
+	}
+	
+    return $ret;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+//
+//--------------------------------------------------------------------------------------------------------*/
+global proc string[] okSortBy(string $array[], string $compareProc)
+{
+    if (size($array) <= 0)  // nothing to sort
+        return $array;
+    
+    if (!size($compareProc))    {
+        warning ("Invalid Compare Function: " + $compareProc);
+        return $array;
+    }
+
+    int $cnt = size($array);
+    int $i, $j, $r;
+    string $temp;
+    
+    for ($i=0; $i < $cnt; ++$i) {
+        for ($j=$i+1; $j < $cnt; ++$j) {
+            if (0>eval($compareProc+" \""+$array[$i]+"\" \""+$array[$j]+"\";")) {
+               $temp = $array[$j];
+               $array[$j] = $array[$i];
+               $array[$i] = $temp;
+            }
+        } // end of j loop
+    }  // end of i loop
+
+    return $array;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+//
+//--------------------------------------------------------------------------------------------------------*/
+global proc int okHashString(string $str) {
+    global string $okHashString_lookup =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890-=`!@#$%^&*()_+{}[]<>|,./\\?";
+    int $dim = size($okHashString_lookup);
+    int $len = size($str);
+    int $i; int $j;
+    int $hash=0;
+    for ($j=1; ($j<=$dim && ($len>0)); $j++) {
+        for ($i=1; $i<=size($str); $i++) {
+            if (substring($okHashString_lookup,$j,$j) == substring($str,$i,$i)) {
+                $hash += pow($dim,($i-1)) * $j;
+                $len--;
+            }
+        }
+
+    }
+    return $hash;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Buffer the current selection, or restore selection from buffer (stack-style)
+//--------------------------------------------------------------------------------------------------------*/
+global proc okMaintainSelection(int $restore) {
+    global string $okMaintainSelection_sel[];
+
+    if (!$restore) {
+        $okMaintainSelection_sel[size($okMaintainSelection_sel)] = "!";
+        $okMaintainSelection_sel = stringArrayCatenate ($okMaintainSelection_sel,`ls -sl -fl`);
+    } else {
+        int $i=size($okMaintainSelection_sel)-1;
+        string $sel[] = {};
+        for (;$i>=0;$i--) {
+            if ($okMaintainSelection_sel[$i]=="!")
+                break;
+            $sel[size($sel)] = $okMaintainSelection_sel[$i];
+        }
+        //print $sel; print "\n";
+        select $sel; clear $sel;
+        appendStringArray $sel $okMaintainSelection_sel $i;
+        $okMaintainSelection_sel = $sel;
+    }
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Run a command for each selected object
+//--------------------------------------------------------------------------------------------------------*/
+global proc string[] okRunForSelected(string $cmd) {
+    return (okRunForArray(`ls -sl -fl`,$cmd));
+}
+
+global proc string[] okRunForArray(string $arr[], string $cmd) {
+    string $ret[];
+    string $type = match("#.*#",$cmd);
+    if (size($type)) {
+        $cmd = `substitute "#.*#" $cmd ""`;
+    }
+    for ($o in $arr) {
+        string $t = okSubstituteAll("%",$cmd,$o);
+        switch ($type) {
+            case "#string[]#" : $ret[size($ret)] = "{\""+stringArrayToString(eval($t),"\",\"")+"\"}"; break;
+            case "#float[]#" :
+            case "#int[]#"   : $ret[size($ret)] = !catchQuiet(eval($t)) ? "#OK" : "#ERROR"; break;
+            case "#int#"     :
+            case "#float#"   :
+            case "#string#"  :
+            default          : $ret[size($ret)] = (eval($t));   break;
+        }
+    }
+    return $ret;
+}
+
+
+//--------------------------------------------------------------------------------------------------------
+// Look up the hierarchy for an object that satisfies the condition (a MEL code that returns 0 or 1)
+// The "%" character will be replaced with the current object
+//--------------------------------------------------------------------------------------------------------
+global proc string okSeekUp(string $o, string $condition) {
+    if ($o=="" || eval(okSubstituteAll("%",$condition,$o)))
+        return $o;
+
+    return okSeekUp(okGetFirst(`listRelatives -p -f $o`),$condition);
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Look down the hierarchy for the first object that satisfies the condition (a MEL code that returns 0 or 1)
+// The "%" character will be replaced with the current object
+//--------------------------------------------------------------------------------------------------------
+global proc string okSeekDown(string $o, string $condition) {
+    if ($o=="" || eval(okSubstituteAll("%",$condition,$o)))
+        return $o;
+
+    string $ret = "";
+    string $childs[] = `listRelatives -c -f $o`;
+    for ($o in $childs) {
+        $ret = okSeekDown($o,$condition);
+        if ($ret!="")
+            break;
+    }
+    return $ret;
+}
+
+
+
+//--------------------------------------------------------------------------------------------------------*/
+// Substitute all occurances of $what in $original with $new. Max substituions is set to 10000, to avoid an
+// infinite loop.
+//--------------------------------------------------------------------------------------------------------*/
+global proc string okSubstituteAll(string $what, string $original, string $new) {
+    string $temp;
+    int $test;
+    int $loopBreaker = 10000;
+
+    do {
+        $temp = substitute($what, $original, $new);
+        $test = (strcmp($temp, $original)!=0);
+        $original = $temp;
+        $loopBreaker--;
+    } while ($test && $loopBreaker);
+
+    return $original;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// returns element at position $entry from an array; negative values evaluate from end of array
+//--------------------------------------------------------------------------------------------------------*/
+global proc string okGetElementAt( int $entry, string $array[] ) {
+    if( $entry<0 ) $entry = (`size $array`) + $entry;
+    return $array[$entry];
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// returns first element of array
+//--------------------------------------------------------------------------------------------------------*/
+global proc string okGetFirst( string $array[] ) {
+    return (okGetElementAt(0,$array));
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// returns last element of array
+//--------------------------------------------------------------------------------------------------------*/
+global proc string okGetLast( string $array[] ) {
+    return (okGetElementAt(-1,$array));
+}
+
+//--------------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------------
+global proc string okGetGlobalVariable (string $varName) {
+
+    string $type = `whatIs $varName`;
+
+    if (!size(match(".*variable",$type)))
+        return "";
+
+    $type = okGetFirst(stringToStringArray($type," "));
+    if ($type == "string[]")
+        return (eval("stringArrayToString("+$varName+",\";\")"));
+
+    string $baseType = match("[^[]*",$type);
+
+    if (!exists("okget"+$baseType))
+        eval("proc string okget"+$baseType+"(" + $baseType + " $v) { return ((string) $v); }");
+
+    if (endString($type,2) == "[]") {
+        string $arr[];
+        int $i,$size = eval("size(" + $varName+")");
+        for ($i=0; $i<$size; $i++) {
+            $arr[$i] = eval("okget"+$baseType+"("+$varName+"["+$i+"])");
+        }
+        return (stringArrayToString($arr,";"));
+    } else {
+        return eval("okget"+$baseType+" " + $varName);
+    }
+}
+
+//--------------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------------
+global proc int okSetGlobalVariable (string $varName, string $value) {
+
+    string $type = `whatIs $varName`;
+
+    if (!size(match(".*variable",$type)))
+        return 0;
+
+    $type = okGetFirst(stringToStringArray($type," "));
+    if ($type == "string[]") {
+        eval($varName+"=stringToStringArray(\""+$value+"\",\";\")");
+    } else if (endString($type,2) == "[]") {
+        int $i, $size = eval("size(" + $varName+")");
+        eval("clear " + $varName);
+        for ($i=0; $i<$size; $i++) {
+            eval($varName+"["+$i+"]=" + $value);
+        }
+    } else {
+        if ($type=="string")
+            $value = "\"" + $value + "\"";
+        eval($varName + "=" + $value);
+    }
+
+    println ($varName + " = " + okGetGlobalVariable($varName));
+    return 1;
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Get selected channels in 'object.attribute' format
+// Channels were selected directly in the outliner will override any selection in the channel-box
+//--------------------------------------------------------------------------------------------------------
+global proc string[] okGetSelectedChannels() {
+    string $channels[];
+    int $i=0;
+    string $o; string $a;
+
+    string $sel[] = `ls -sl`;
+    // Direct Attribute Selection
+    for ($o in $sel) {
+        string $buf[];
+        if ((tokenize($o,".[]",$buf)>1) && (attributeExists($buf[1],$buf[0])))
+           $channels[$i++] = $o;
+    }
+    if ($i>0)
+        warning("Using selected attributes; Ignoring ChannelBox selections");
+    else {
+        // ChannelBox Selection:
+
+        // Object Nodes
+        string $objList[] = `channelBox -q -mainObjectList mainChannelBox`;
+        // account for last selected object being put first in the returned array; remove the first and put it at the end
+        string $newList[] = stringArrayRemove({$objList[0]},$objList);
+        $newList[size($newList)] = $objList[0];
+        string $attrList[] = `channelBox -q -selectedMainAttributes mainChannelBox`;
+        for ($o in $newList)
+            for ($a in $attrList)
+                $channels[$i++] = okGetFirst(`ls ($o+"."+$a)`); // this will get the full name of an attribute
+
+        // Shape Nodes
+        $objList= `channelBox -q -shapeObjectList mainChannelBox`;
+        $attrList= `channelBox -q -selectedShapeAttributes mainChannelBox`;
+        for ($o in $objList)
+            for ($a in $attrList)
+                $channels[$i++] = okGetFirst(`ls ($o+"."+$a)`);
+
+        // History Nodes
+        $objList= `channelBox -q -historyObjectList mainChannelBox`;
+        $attrList= `channelBox -q -selectedHistoryAttributes mainChannelBox`;
+        for ($o in $objList)
+            for ($a in $attrList)
+                $channels[$i++] = okGetFirst(`ls ($o+"."+$a)`);
+
+        // Output Nodes
+        $objList= `channelBox -q -outputObjectList mainChannelBox`;
+        $attrList= `channelBox -q -selectedOutputAttributes mainChannelBox`;
+        for ($o in $objList)
+            for ($a in $attrList)
+                $channels[$i++] = okGetFirst(`ls ($o+"."+$a)`);
+    }
+
+    return $channels;
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Get the object name or the attribute name part of a full 'object.attribute' channel name.
+//--------------------------------------------------------------------------------------------------------
+global proc string okGetObjFromChannel(string $channelName) {
+        string $res[];
+        tokenize $channelName "." $res;
+        return $res[0];
+        
+}
+
+global proc string okGetAttrFromChannel(string $channelName) {
+//        string $res[];
+//        tokenize $channelName "." $res;
+        string $obj = okGetObjFromChannel($channelName);
+        string $attr = endString($channelName,size($channelName)-size($obj)-1);
+        return $attr;
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Get the object name out of a path name
+//--------------------------------------------------------------------------------------------------------
+global proc string okGetObjName(string $o) {
+    string $res[];
+    tokenize $o "|" $res;
+    return $res[size($res)-1];
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Get the object name out of a path name
+//--------------------------------------------------------------------------------------------------------
+global proc string okRenameByParent(string $o) {
+    string $p = okGetFirst(`listRelatives -p $o`);
+    if (!size($p)) {
+        warning "Object has no parent";
+        return $o;
+    }
+    $p = okGetObjName($p);
+    $newName = okGetObjName($o);
+    string $suffix = match("[0-9]*$",$newName);
+    $newName = $p + "_" + startString($newName,(size($newName))-(size($suffix)));
+
+    return `rename $o $newName`;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Check if an channel is Static (meaning its attribute is inherent to the node) or Dynamic, meaning
+// it was added by the user.
+//--------------------------------------------------------------------------------------------------------*/
+global proc int okIsDynamic(string $chan) {
+    string $o = okGetObjFromChannel($chan);
+    string $a = okGetAttrFromChannel($chan);
+    return (stringArrayCount($a,`listAttr -ud $o`));
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Dis/connect attribute without string concatenation...
+//--------------------------------------------------------------------------------------------------------*/
+global proc string okConnectAttr(string $fObj, string $fAttr, string $tObj, string $tAttr) {
+    return `connectAttr ($fObj+"."+$fAttr) ($tObj+"."+$tAttr)`;
+}
+
+global proc string okDisconnectAttr(string $fObj, string $fAttr, string $tObj, string $tAttr) {
+    return `disconnectAttr ($fObj+"."+$fAttr) ($tObj+"."+$tAttr)`;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Connect by message
+//--------------------------------------------------------------------------------------------------------*/
+global proc okConnectMessage(string $src, string $dest, string $name) {
+    if (!`attributeExists $name $dest`)
+        addAttr -at message -ln $name $dest;
+    okConnectAttr($src,"message",$dest,$name);
+    sprint("Connecting %.message --> %.%",{$src,$dest,$name});
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Get the relative node that is connected by named message to the specified object
+//--------------------------------------------------------------------------------------------------------*/
+global proc string okGetMsgRelative(string $o, string $name) {
+    if (!`attributeExists $name $o`)
+        return "";
+    return okGetFirst(`listConnections ($o+"."+$name)`);
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Combine selected nurbs curve shapes into the transform of the last object selected
+// DELETES remaining transform nodes if empty.
+//--------------------------------------------------------------------------------------------------------*/
+global proc string okCombineShapes() {
+    string $objs[] = `ls -sl -l`;
+    string $p = okGetLast($objs);
+    select -d $p;
+    $objs = `ls -sl -l`;
+    string $shps[] = `listRelatives -f -type "shape" -s $objs`;
+    if (!size($shps)) {
+        error "No shapes were found";
+    }
+    //makeIdentity -apply true -t 1 -r 1 -s 1 -n 0;
+    select $shps $p;
+    parent -r -s;
+    if (size(`listRelatives -c $objs`)==0)
+        delete $objs;
+    select $p;
+    return $p;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Detach Shapes into a new transform group
+//--------------------------------------------------------------------------------------------------------*/
+global proc okDetachShapes(string $o) {
+    string $g = `group -em -p $o -n ("shapes_"+$o)`;
+    parent -r -s `listRelatives -s $o` $g;
+    select $g;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Create a Point-on-Curve-Info node and attaches to selected curve. Also creates a locator
+// attached to the pointOnCurveInfo node's output position.
+//--------------------------------------------------------------------------------------------------------*/
+global proc string[] okMakePointOnCurveInfoNode() {
+    $obj = okGetFirst(`ls -sl`);
+    if ($obj!="") {
+        string $obj = okGetFirst(`listRelatives -s`);
+        if (`nodeType $obj`=="nurbsCurve") {
+            string $poci = `createNode pointOnCurveInfo -n ("poci_"+$obj)`;
+                setAttr -k on .parameter;
+                setAttr -k on .turnOnPercentage;
+            string $loc = okGetFirst(`spaceLocator -n ("pociLoc_"+$obj)`);
+                addAttr -k on -ln "parameter";
+                addAttr -k on -ln "turnOnPercentage";
+            okConnectAttr($obj,"worldSpace",$poci,"inputCurve");
+            okConnectAttr($poci,"position",$loc,"translate");
+            okConnectAttr($loc,"parameter",$poci,"parameter");
+            okConnectAttr($loc,"turnOnPercentage",$poci,"turnOnPercentage");
+            select $loc;
+            return {$loc,$poci};
+        }
+    } else {
+        string $poci = `createNode pointOnCurveInfo`;
+        setAttr -k on .parameter;
+        setAttr -k on .turnOnPercentage;
+        return {$poci};
+    }
+}
+
+
+//--------------------------------------------------------------------------------------------------------*/
+// Create a Point-on-Curve-Info node and attaches to selected curve. Also creates a locator
+// attached to the pointOnCurveInfo node's output position.
+//--------------------------------------------------------------------------------------------------------*/
+global proc string[] okMakePointOnSurfaceInfoNode(int $world) {
+
+    $obj = okGetFirst(`ls -sl`);
+    if ($obj!="") {
+        string $obj = okGetFirst(`listRelatives -s`);
+        if (`nodeType $obj`=="nurbsSurface") {
+            string $posi = `createNode pointOnSurfaceInfo -n ("posi_"+$obj)`;
+                setAttr -k on .parameterU;
+                setAttr -k on .parameterV;
+                setAttr -k on .turnOnPercentage;
+            string $loc = okGetFirst(`spaceLocator -n ("posiLoc_"+$obj)`);
+                addAttr -k on -ln "parameterU";
+                addAttr -k on -ln "parameterV";
+                addAttr -k on -ln "turnOnPercentage";
+            if ($world)
+                okConnectAttr($obj,"worldSpace",$posi,"inputSurface");
+            else
+                okConnectAttr($obj,"local",$posi,"inputSurface");
+            okConnectAttr($posi,"position",$loc,"translate");
+            okConnectAttr($loc,"parameterU",$posi,"parameterU");
+            okConnectAttr($loc,"parameterV",$posi,"parameterV");
+            okConnectAttr($loc,"turnOnPercentage",$posi,"turnOnPercentage");
+            select $loc;
+            return {$loc,$posi};
+        }
+    } else {
+        string $posi = `createNode pointOnSurfaceInfo`;
+            setAttr -k on .parameterU;
+            setAttr -k on .parameterV;
+            setAttr -k on .turnOnPercentage;
+        return {$posi};
+    }
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Create an nullifier transform node above the specified object
+//--------------------------------------------------------------------------------------------------------*/
+global proc string okNullify(string $o) {
+
+    string $null = `group -em -n ("trNul_"+$o)`;
+    parent $null $o;
+    setAttr ".translateX" 0;setAttr ".translateY" 0;setAttr ".translateZ" 0;
+    setAttr ".rotateX" 0;setAttr ".rotateY" 0;setAttr ".rotateZ" 0;
+    string $parent = okGetFirst(`listRelatives -p $o`);
+    if ($parent != "")
+        parent $null $parent;
+    else
+        parent -world $null;
+    parent $o $null;
+    return $null;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Zeros the transfroms of a node, essentially aligning its pivot point with the origin
+//--------------------------------------------------------------------------------------------------------*/
+global proc okResetTransforms(string $o) {
+    vector $tr = `xform -q -rp $o`; $tr*=-1;
+    xform -t ($tr.x) ($tr.y) ($tr.z) $o;
+    makeIdentity -apply true -t 1 $o;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Create a locked attribute to designate a new section of attributes in the selected node
+//--------------------------------------------------------------------------------------------------------*/
+global proc string okAddSection(string $sectionName) {
+
+    global string $OK_PROMPT_CANCELLED;
+
+    string $o = okGetObj();
+    string $sections[] = `listAttr -ud -l -st "_*" $o`;
+    string $t = "_";
+    if (size($sections)>0)
+        $t = okGetLast($sections)+"_";
+
+    string $newSection;
+    if (endString($sectionName,1)=="!")
+        $newSection = startString($sectionName,size($sectionName)-1);
+    else
+        $newSection = okPrompt("Section Name:",$sectionName,"_CANCELLED_");
+
+    if ($newSection != "_CANCELLED_") {
+        for ($o in `ls -sl`) {
+                addAttr -ln $t -k 1 -at "enum" -en ($newSection+":") $o;
+                setAttr -l 1 ($o+"."+$t);
+        }
+        return ($t + ":" + $newSection);
+    }
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Parent object to its grandparent
+//--------------------------------------------------------------------------------------------------------*/
+global proc okGrandParent() {
+
+    for ($o in `ls -sl`) {
+        string $p = okGetFirst(`listRelatives -f -p $o`);
+        if ($p=="") return;
+
+        string $mode = "-r ";
+        if (`optionVar -q parentPreserve`)
+        $mode = "-a ";
+
+        string $gp = okGetFirst(`listRelatives -f -p $p`);
+        if ($gp=="") $mode += "-w ";
+        eval("parent " + $mode + $o + " " + $gp);
+    }
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Creates a locator at the position (and orientation) of the selected points
+//--------------------------------------------------------------------------------------------------------
+global proc string[] okLocatorHere() {
+    string $points[] = `ls -sl -fl`;
+    if (size($points)==0) {
+        return `CreateLocator`;
+    }
+
+    float $pos[]; float $rot[];
+    string $locs[];
+    for ($p in $points) {
+        if (size(match("\\.",$p))) // check if point is a subobject
+            $pos = `pointPosition -w $p`;
+        else
+            $pos = `xform -q -ws -a -piv $p`;
+        $rot = `xform -q -ws -ro $p`;
+        if (size($pos)>=3) {
+            $locs[size($locs)] = okGetFirst(`spaceLocator -n ("loc_" + $p)`);
+            xform -ws -t $pos[0] $pos[1] $pos[2] -ro $rot[0] $rot[1] $rot[2] ;
+        }
+    }
+    select $locs;
+    return $locs;
+}
+
+
+//--------------------------------------------------------------------------------------------------------
+// Create locators to be used as spacial parent constraints for the given control
+//--------------------------------------------------------------------------------------------------------
+global proc string[] okCreateSpaceParents(string $o) {
+
+    okAddSection "Spaces";
+    string $space = okPrompt("Enter Space Name (First):","World","");
+
+    string $spaces[];
+    while ($space!="") {
+        $spaces[size($spaces)] = $space;
+        addAttr -k 1 -ln $space -min 0 -max 1 -dv 0 $o;
+        $space = okPrompt("Enter Space Name ("+(size($spaces)+1)+"):",$space,"");
+    }
+
+    string $null = okNullify($o);
+    select $null;
+    string $spaceNodes[] = {};
+    for ($space in $spaces) {
+        $spaceNodes[size($spaceNodes)] = `rename (okLocatorHere()) ("loc_"+$o+"Space_"+$space)`;
+        makeIdentity -apply true -t 1 -r 1 -s 0 -n 0;
+    }
+    string $prCon = okGetFirst(`parentConstraint $spaceNodes $null`);
+    int $i=0;
+    for ($i=0; $i<size($spaces); $i++)
+        okConnectAttr($o,$spaces[$i],$prCon,"w"+$i);
+    setAttr ($o+"."+$spaces[0]) 1;
+    select $spaceNodes;
+    return $spaceNodes;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Split-constrain joint
+//--------------------------------------------------------------------------------------------------------*/
+global proc string okDisconnectConstrainJoint(string $jnt) {
+//string $jnt = okGetObj();
+    okMaintainSelection 0;
+    string $p = firstParentOf($jnt);
+    select $jnt;
+    string $jntCon = `joint -n (substitute("jnt",$jnt,"jntCon"))`;
+    string $jntPar = okGetFirst(`duplicate -n (substitute("jnt",$jnt,"jntPar"))`);
+    parent -w $jntPar;
+    parent $jntCon $p;
+    parent $jnt $jntPar;
+    parentConstraint $jntCon $jntPar;
+    okMaintainSelection 1;
+    return $jntPar;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Copy joint orientation between two joints, while preserving children transformation
+//--------------------------------------------------------------------------------------------------------*/
+global proc okCopyJointOrientation(string $jSrc, string $jTgt) {
+
+    okMaintainSelection 0;
+    
+    // get parents;
+    string $pSrc = firstParentOf($jSrc);
+    string $pTgt = firstParentOf($jTgt);
+    
+    //get shapes, and move them to a temp group
+    string $shapes[] = `listRelatives -s $jTgt`;
+    string $shapesHolder = `group -em -n tempShapesHolder -p $jTgt`;
+    if (size($shapes))
+        parent -r -s $shapes $shapesHolder;
+    
+    //get chilren and move them to temp group
+    parent `listRelatives -type transform $jTgt` $shapesHolder;
+    parent -w $shapesHolder;
+    
+    //parent the target joint to the parent of the source joint, and copy orientation values
+    parent $jTgt $pSrc;
+    float $jo[] = `getAttr ($jSrc+".jo")`;
+    setAttr ($jTgt+".jo") ($jo[0]) ($jo[1]) ($jo[2]);
+    
+    //revert everything
+    //reparent:
+    parent $jTgt $pTgt;
+    parent `listRelatives -type transform $shapesHolder` $jTgt;
+    if (size($shapes)) {
+        parent $shapesHolder $jTgt; makeIdentity -a 1 -t 1 -r 1 -s 1 $shapesHolder;
+        parent -r -s `listRelatives -s $shapesHolder` $jTgt;
+    }   
+    delete $shapesHolder;
+
+    okMaintainSelection 1;  
+}
+
+/*
+//--------------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------------
+global proc okMergeHierarchy(string $from, string $to) {
+
+}
+*/
+
+//--------------------------------------------------------------------------------------------------------
+//
+//--------------------------------------------------------------------------------------------------------
+global proc vector okHashStringToColor(string $str) {
+    int $hash = abs(okHashString($str));
+    float $color[];
+    $color[0] = ($hash % 2000)/2000.0;
+    $color[1] = ($hash % 90)/100.0;
+    $color[2] = ($hash % 500)/700.0;
+
+    //$color[0] = (float ($hash % $base))/$base;    $hash /= $base;
+    //$color[1] = (float ($hash % $base))/$base;    $hash /= $base;
+    //$color[2] = (float ($hash % $base))/$base;
+    vector $vcol = `hsv_to_rgb <<($color[0]),($color[1]),($color[2]*.3+.2)>>`;
+    return $vcol;
+    //displayRGBColor background ($vcol.x) ($vcol.y) ($vcol.z);
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Get the RGB values of an indexed color
+//--------------------------------------------------------------------------------------------------------
+global proc vector okGetIndexedColor(int $idx) {
+    vector $color = eval(sprintf("displayRGBColor -q userDefined%",{(string)($idx+1)}));
+    return ($color);
+}
+
+
+
+//--------------------------------------------------------------------------------------------------------
+// Set the color of a shape
+//--------------------------------------------------------------------------------------------------------
+global proc okSetShapeColor(int $color) {
+    okMaintainSelection 0;
+    string $arr[] = `listRelatives -f -s`;
+    for ($o in $arr) {
+        select $o;
+        setAttr .overrideEnabled 1;
+        setAttr .overrideColor $color;
+    }
+    okMaintainSelection 1;
+}
+
+//--------------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------------
+global proc string[] okListGlobalProcs(string $fileName) {
+    $fileName = match(("[^ ]:/.*"),`whatIs $fileName`);
+    int $fid = `fopen $fileName "r"`;
+    string $procs[];
+    string $procStr;
+    string $str = `fgetline $fid`;
+
+    while (size($str)>0) {
+        $str = match("^[:blank:]*global proc [^{]*",$str);
+        if ($str!="") {
+            $procs[size($procs)] = $str;
+        }
+
+        $str = `fgetline $fid`;
+    }
+    fclose $fid;
+    return $procs;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+// Load a procedure definition from file by procedure name.
+//--------------------------------------------------------------------------------------------------------*/
+global proc string okGetProcDefFromFile(string $fileName, string $procName) {
+    int $fid = `fopen $fileName "r"`;
+    string $str;
+    string $procStr;
+    int $done = false;
+    int $collect = (!size($procName));
+
+    do {
+        $str = `fgetline $fid`;
+        if (size($str)>0) {
+           if (!$collect) {
+                // Check if Proc found
+                $collect = size(match(".*proc .*" + $procName,$str));
+                if ($collect) $procStr += $str;
+           } else if ((size($procName)) && (size(match(".*proc .*[(]",$str)))) {
+                // End of Proc
+                // $procStr += $str;
+                $done = true; $collect = false;
+           } else {
+                // Inside Proc - Collecting
+                $procStr += $str;
+           }
+        } else
+            $done = true;
+    } while (!$done);
+    fclose $fid;
+    return $procStr;
+}
+
+//--------------------------------------------------------------------------------------------------------*/
+//--------------------------------------------------------------------------------------------------------*/
+global proc string okWhatIs(string $procName) {
+	
+	string $whatIs = `whatIs $procName`;
+	
+	if (gmatch("Run Time Command",$whatIs)) {
+		return `runTimeCommand -q -c $procName`;
+	} else {
+		string $file = match(".:/.*\.mel",$whatIs);
+	    if (size($file)) {
+	        if (`basename $file ".mel"`==$procName)
+	            $procName = "";
+	        return ("\n"+(okGetProcDefFromFile($file,$procName)));
+	    }
+	}
+    return $whatIs;
+
+}
+
+
+//--------------------------------------------------------------------------------------------------------*/
+// Load an expression script from a file. File is assumed to be in the scripts folder.
+// Expression definition must end with '//' and the expression name.
+//--------------------------------------------------------------------------------------------------------*/
+/*
+global proc string okGetExpressionFromFile(string $fileName, string $xprName) {
+    $fileName = (`internalVar -userScriptDir` + $fileName);
+    return (okGetProcDefFromFile($fileName,$xprName));
+}
+*/
+//--------------------------------------------------------------------------------------------------------*/
+// Capture the viewport into an icon file
+//--------------------------------------------------------------------------------------------------------*/
+global proc okIconCapture(string $fname, int $dim, int $fmt) {
+    int $curFrame = `currentTime -q`;
+    int $t = `getAttr defaultRenderGlobals.imageFormat`;
+    setAttr "defaultRenderGlobals.imageFormat" $fmt;
+    string $ret = `playblast -p 100 -cf $fname -fmt "image" -fr $curFrame  -v 0 -wh $dim $dim`;
+    setAttr "defaultRenderGlobals.imageFormat" $t;
+    println("new icon created: " + $ret);
+}
+
+
+//--------------------------------------------------------------------------------------------------------*/
+// Replace a shape node and transfer any connections
+//--------------------------------------------------------------------------------------------------------*/
+global proc okReplaceShape(string $new, string $old) {
+    string $newParent = okGetFirst(`listRelatives -p $new`);
+    string $oldParent = okGetFirst(`listRelatives -p $old`);
+    okCopyAllConnectionsFromTo($old,$new,"",1,1);
+    parent -r -s $new $oldParent;
+    setAttr ($new+".io") 1;
+    delete $old;
+    rename $new $old;
+}
+
+
+//--------------------------------------------------------------------------------------------------------*/
+// Create a standard footer for my tools
+//--------------------------------------------------------------------------------------------------------*/
+global proc string okFooter(string $title) {
+    string $currentParent = `setParent -q`;
+    string $footer = `columnLayout -adj 1 okFooter`;
+        text -en 0 -l $title -font boldLabelFont -align left okhcText1;
+        text -en 0 -l "by Ofer Koren (www.MrBroken.com)" -align left okhcText2;
+    setParent $currentParent;
+    return $footer;
+}
