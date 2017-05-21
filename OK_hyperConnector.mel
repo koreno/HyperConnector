@@ -1,0 +1,1404 @@
+//------------------------------------------------------------------------------------------------------------//
+//------------------------------------------------------------------------------------------------------------//
+//  SCRIPT: OK_hyperConnector.mel
+//  AUTHOR: Ofer Koren
+//          www.MrBroken.com
+//  DATE:       Dec 14, 2006
+//  VERSION:    2.0
+//
+//  DESCRIPTION:    This script creates the HyperConnector popup-menus in the channel-box. Access by
+//              ctrl-right-click in the Channel-Box, or "HyperConnector..." in the channel-box menu.
+//              The HyperConnector allows advanced connections between nodes. First 'Mark' the channels
+//              you wish to use as source for the connection, select the destination channels and choose the
+//              type of connection you wish to perform (normal, negate, specific, reverse, visiblity...)
+//              The HyperConnector takes into account the number of source channels and destination channels
+//              when performing connections, whether 1-to-1, 1-to-many, many-to-many.
+//
+//  INSTALLATION:   Call "OK_hyperConnector" from the command script
+//                  Or - add the following to your userSetup.mel script:
+//                        source OK_hyperConnector;
+//
+//  This script requires OK_utils.mel, OK_manageConnections.mel, OK_connections.mel
+//
+//
+//  UPDATES:
+//
+//          Version 2.0:
+//              * New Window for previewing advanced connection procedures
+//          Version 1.2:
+//              * Combine with value - New Advanced Connections allow combining channels with a specified value
+//          Version 1.12:
+//              * Connecting multiple channels into one multi-attributes
+//              * Bug fix - replaces any other popups that occupy the ChannelBox
+//              * Bug fix - displays a warning if a connection wasn't possible and continues
+//              * Bug fix - displays a warning if a paste-value wasn't possible and continues
+//          Version 1.11:
+//              * Channel List Sorting - RGB attributes maintain RGB sorting order (instead of alphabetical BGR)
+//          Version 1.1:
+//              * Modify Connections submenu - Allows modifying a existing connections (applying calculation nodes)
+//              * Inputs/Outputs submenus - Lists the direct inputs/outputs of a channel
+//              * Filters Button - Filter the list of attributes in the HyperConnector channels window
+//              * Added annotations to the various menu items
+//
+//
+//
+//------------------------------------------------------------------------------------------------------------//
+//------------------------------------------------------------------------------------------------------------//
+
+
+
+//--------------------------------------------------------------------------------------------------------
+// Redefine the println procedure (from OK_utils.mel)
+//--------------------------------------------------------------------------------------------------------
+proc println(string $str) {
+    okPrintln("HyperConnector: " + $str);
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Creates the HyperConnector menus as a Ctrl+Right-Click menu and a submenu in the ChannelBox
+//--------------------------------------------------------------------------------------------------------
+proc okhcInitialize_HCMenus() {
+    global string $gChannelBoxForm;
+
+    string $oldPopups[] = `control -q -pma $gChannelBoxForm`;
+    if (size($oldPopups))
+        deleteUI $oldPopups;
+
+    if (`popupMenu -exists okhcPopupMenu`)
+        deleteUI okhcPopupMenu;
+
+
+    popupMenu
+        -parent $gChannelBoxForm
+        -ctl 1 // Ctrl Right-Click
+        -pmc "okhcHCMenu_Build okhcPopupMenu"
+        okhcPopupMenu;
+
+
+    if (`menuItem -exists okhcHyperConnectorWinMenuItem`)
+        deleteUI okhcHyperConnectorWinMenuItem;
+
+    string $cbPopup = okGetFirst(`channelBox -q -pma mainChannelBox`);
+    $cbPopup = `setParent -m $cbPopup`;
+    generateChannelMenu $cbPopup 1;
+    menuItem -l "HyperConnector..."
+        -ia ($cbPopup+"|connectionEditorItem")
+        -parent $cbPopup
+        -c "okhcAttributesWin_Build \"\""
+        okhcHyperConnectorWinMenuItem;
+
+    scriptJob -e "NewSceneOpened" "okhcClearList $okhcSourceChannels; okhcClearList $okhcTargetChannels" -p okhcPopupMenu;
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Initialize global variables
+//--------------------------------------------------------------------------------------------------------
+
+proc okhcInitialize() {
+
+    global string $okhcModifiers[];
+    $okhcModifiers = {
+            // 1-to-1
+        "Normal",       1,  "okcnConnectConvert(%src%,%tgt%,1)",
+        "Reverse",      1,  "okcnConnectConvert(%src%,%tgt%,0)",
+        "Negate",       1,  "okcnConnectConvert(%src%,%tgt%,-1)",
+        "Specific",     1,  "okcnConnectConvert(%src%,%tgt%,%val%)",
+        "Rad2Deg",     1,  "okcnConnectConvert(%src%,%tgt%,(`rad_to_deg 1`))",
+		"Deg2Rad",     1,  "okcnConnectConvert(%src%,%tgt%,(`deg_to_rad 1`))",
+        "Visibility",   1,  "okcnConnectConvert(%src%,%tgt%,100)",
+        "Scaler",       1,  "okcnConnectScalers(%src%,%tgt%)",
+        "Curve",        1,  "okcnCurveConnect(%src%,%tgt%)",
+            // 2-to-1
+        "Blend",        2,  "okcnCombineChannelsOrValue(%src%,%tgt%,\"blend\",%seq%,%useval%,%val%)",
+        "Multiply",     2,  "okcnCombineChannelsOrValue(%src%,%tgt%,\"multiply\",%seq%,%useval%,%val%)",
+        "Divide",       2,  "okcnCombineChannelsOrValue(%src%,%tgt%,\"divide\",%seq%,%useval%,%val%)",
+        "Power",        2,  "okcnCombineChannelsOrValue(%src%,%tgt%,\"power\",%seq%,%useval%,%val%)",
+            // many-to-1
+        "Average",      0,  "okcnCombineChannelsOrValue(%src%,%tgt%,\"average\",%seq%,%useval%,%val%)",
+        "Add",          0,  "okcnCombineChannelsOrValue(%src%,%tgt%,\"add\",%seq%,%useval%,%val%)",
+        "Subtract",     0,  "okcnCombineChannelsOrValue(%src%,%tgt%,\"subtract\",%seq%,%useval%,%val%)",
+		"Array",		0,	"okcnConnectConvert(%src%,%tgt%,1)",
+		"Choice",       0,  "okcnCombineChannelsOrValue(%src%,%tgt%,\"choice\",%seq%,%useval%,%val%)"
+    };
+
+    global string $okhcLastModifierStr = "Normal";
+
+
+    global string $okhcAttrFilters[];
+    $okhcAttrFilters = {
+            "last","common",
+            "keyable","userDefined","visible","unlocked",
+            "scalar","scalarAndArray",
+            "channelBox","hasData",
+            "locked","leaf","multi",
+            "output","write","read","readOnly",
+            "array","caching"};
+
+    okhcInitialize_HCMenus();
+
+    println("HyperConnector Initialized");
+}
+
+
+
+//--------------------------------------------------------------------------------------------------------
+// Toggles filter checkbox
+//--------------------------------------------------------------------------------------------------------
+global proc okhcAttributesWin_ToggleFilter(string $filter) {
+    $filter = "okhcFiltersCB_" + $filter;
+    int $v = `checkBox -q -v $filter`;
+    checkBox -e -v (1-$v) $filter;
+    okhcAttributesWin_SelectionChanged {};
+}
+
+
+//--------------------------------------------------------------------------------------------------------
+// Builds the filter checkbox list
+//--------------------------------------------------------------------------------------------------------
+global proc okhcFiltersMenu_Build() {
+    global string $okhcAttrFilters[];
+    setParent -m okhcFiltersPopupMenu;
+
+    menu -e -dai okhcFiltersPopupMenu;
+    for ($f in $okhcAttrFilters) {
+        int $v = `checkBox -q -v ("okhcFiltersCB_" + $f)`;
+        menuItem -l $f -cb $v -c ("okhcAttributesWin_ToggleFilter " + $f);
+    }
+}
+
+
+//--------------------------------------------------------------------------------------------------------
+// Returns a list of common attributes shared by the specified nodes
+//--------------------------------------------------------------------------------------------------------
+global proc string[] okhcGetCommonAttrs(string $nodes[]) {
+        global string $okhcAttrFilters[];
+        global string $okhcSourceChannels[];
+
+        stringArrayIntersector -e -r okhcIntersector;
+        $filterStr = "";
+
+        for ($f in $okhcAttrFilters) {
+            if (`checkBox -q -v ("okhcFiltersCB_" + $f)`) {
+                if ($f=="last") {
+                    string $attrs[]; string $c;
+                    for ($c in $okhcSourceChannels)
+                        $attrs[size($attrs)] = okGetAttrFromChannel($c);
+                    stringArrayIntersector -e -i $attrs okhcIntersector;
+                } else if ($f=="common") {
+                    string $attrs[] = {"translate","translateX","translateY","translateZ",
+                                       "rotate","rotateX","rotateY","rotateZ",
+                                       "scale","scaleX","scaleY","scaleZ",
+									   "shear","shearXY","shearXZ","shearYZ",
+                                       "jointOrient","jointOrientX","jointOrientY","jointOrientZ",
+                                       "visibility","inMesh","create","worldSpace","local"};
+                    stringArrayIntersector -e -i $attrs okhcIntersector;
+                } else {
+                    $filterStr += (" -" + $f);
+                }
+            }
+        }
+
+        for ($o in $nodes) {
+            stringArrayIntersector -e -i (eval("listAttr " + $filterStr + " " +$o)) okhcIntersector;
+        }
+
+        string $attrs[]=`stringArrayIntersector -q okhcIntersector`;
+        // RGB attributes get sorted to BGR, so we manually resort them here:
+        int $i=0;
+        for ($i=0; $i<size($attrs); $i++) {
+            if (endsWith($attrs[$i],"B")) {
+                string $base = startString($attrs[$i],size($attrs[$i])-1);
+                if (($attrs[$i+1]==($base+"G")) && ($attrs[$i+2]==($base+"R"))) {
+                    $attrs[$i] = $base+"R";
+                    $attrs[$i+2] = $base+"B";
+                    $i+=2;
+                } else {
+                    println("DEBUG - RGB resort skipped");
+                }
+            }
+        }
+
+        return $attrs;
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Selection change callback
+//--------------------------------------------------------------------------------------------------------
+global proc okhcAttributesWin_SelectionChanged(string $unused[]) {
+
+    string $a;
+    string $nodes[] = `selectionConnection -q -obj okhcSelection`;
+    textScrollList -e -removeAll okAttrsLst;
+    for ($a in (okhcGetCommonAttrs($nodes))) {
+        textScrollList -e -a $a okAttrsLst;
+    }
+}
+
+//--------------------------------------------------------------------------------------------------------
+global proc okhcPreconWin_BuildChanListPopup(string $parent) {
+
+	string $channelsArray = "$" + match(".+Channels",$parent);
+	string $otherArray = (gmatch($channelsArray,"*Target*")) ? 
+								substitute("Target",$channelsArray,"Source") : 
+								substitute("Source",$channelsArray,"Target");
+	string $channelsScrollList =  match(".+Channels",$parent) + "List";
+	
+    setParent -m $parent;
+    menu -e -dai $parent;   // clean the menu
+
+        menuItem -l "Add Selected Channels"
+			-c ("okhcMarkChannels " + $channelsArray + " $okhcSelectedChannels 0; okhcPreconWin_Refresh();")
+            okhcAddChannelsMenuItem;
+        menuItem -d true;
+		
+        menuItem -l "Remove Channels"
+			-c (sprintf("% = stringArrayRemove(`textScrollList -q -si %`,%); okhcPreconWin_Refresh();",
+					{$channelsArray,$channelsScrollList,$channelsArray}))
+            okhcRemoveChannelsMenuItem;
+        menuItem -d true;
+		
+        menuItem -l "Move to Top"
+			-c (sprintf("$chns = (`textScrollList -q -si %`); % = stringArrayCatenate($chns,stringArrayRemove($chns,%));okhcPreconWin_Refresh();",
+					{$channelsScrollList, $channelsArray, $channelsArray}))
+            okhcMoveToTopMenuItem;
+        menuItem -l "Move to Bottom"
+			-c (sprintf("$chns = (`textScrollList -q -si %`); % = stringArrayCatenate(stringArrayRemove($chns,%),$chns);okhcPreconWin_Refresh();",
+					{$channelsScrollList, $channelsArray, $channelsArray}))
+            okhcMoveToBottomMenuItem;
+        menuItem -d true;
+		
+		menuItem -l "Select Channels"
+			-c ("select (`textScrollList -q -si "+$channelsScrollList+"`)")
+			okhcSelectChannelMenuItem;
+        menuItem -d true;
+		
+		menuItem -l "Move to Opposite List"
+			-c (sprintf("$chns = (`textScrollList -q -si %`); % = stringArrayCatenate(%,$chns); % = stringArrayRemove($chns,%); okhcPreconWin_Refresh();",
+					{$channelsScrollList, $otherArray, $otherArray, $channelsArray, $channelsArray}))
+			okhcMoveToOppositeMenuItem;
+}
+
+	
+//--------------------------------------------------------------------------------------------------------
+proc okhcPreconWin_BuildSettingLayout() {
+
+    global string $okhcModifiers[];
+
+    formLayout okhcSettingsLayout;
+        radioCollection okhcModifierRadios;
+
+        radioButtonGrp
+            -numberOfRadioButtons 2 -adj 3
+            -label "Ordering:" -labelArray2 "Respective" "Sequential"
+			-cw 1 75 -cw 2 90
+            -cl3 "left" "left" "left"
+            -ct3 "left" "left" "left"
+            -onc "okhcPreconWin_Refresh()"
+            -sl 1
+            okhcOrderingRadios;
+        radioButtonGrp
+            -numberOfRadioButtons 3 -adj 4
+            -label "Use Value:" -labelArray3 "None" "Pre" "Post"
+			-cw 1 75 -cw 2 60 -cw 3 55
+            -cl4 "left" "left" "left" "left"
+            -ct4 "left" "left" "left" "left"
+            -onc "okhcPreconWin_Refresh()"
+            -sl 1
+            okhcUseValueRadios;
+        text -l "Connection Modifiers:"
+            okhcModifiersHeader;
+
+        columnLayout -adj 1 -co "left" 15 -cal "left" okhcModifiers1;
+            text -l "1-to-1" -h 20;
+        setParent ..;
+        separator -hr 0 -st "single" okhcSep1;
+
+        columnLayout -adj 1 -co "left" 15 -cal "left" okhcModifiers2;
+            text -l "2-to-1" -h 20;
+        setParent ..;
+        separator -hr 0 -st "single" okhcSep2;
+
+        columnLayout -adj 1 -co "left" 15 -cal "left" okhcModifiers0;
+            text -l "Many-to-1" -h 20;
+        setParent ..;
+
+        int $m=0;
+        for ($m=0; $m<size($okhcModifiers); $m+=3) {
+            radioButton
+                -p ("okhcModifiers" + $okhcModifiers[$m+1])
+                -l $okhcModifiers[$m]
+                -da ((int)$okhcModifiers[$m+1])
+                -cl okhcModifierRadios
+                -onc ("button -e -l \"Connect ("+$okhcModifiers[$m]+")\" okhcMakeConnectionsBtn")
+                ("okhcModifier_"+$okhcModifiers[$m]);
+        }
+        radioCollection -e -sl ("okhcModifier_"+$okhcModifiers[0]) okhcModifierRadios;
+
+    formLayout -e
+
+        -af okhcOrderingRadios top 2
+        -af okhcOrderingRadios left 10
+        -af okhcOrderingRadios right 2
+
+        -ac okhcUseValueRadios top 2 okhcOrderingRadios
+        -af okhcUseValueRadios left 10
+        -af okhcUseValueRadios right 2
+
+        -ac okhcModifiersHeader top 4 okhcUseValueRadios
+        -aoc okhcModifiersHeader left 0 okhcUseValueRadios
+
+        -ac okhcSep1 top 4 okhcModifiersHeader  -aoc okhcSep1 bottom 0 okhcModifiers2
+        -ac okhcSep2 top 4 okhcModifiersHeader  -aoc okhcSep2 bottom 0 okhcModifiers0
+
+        -ac okhcModifiers1 top 0 okhcModifiersHeader
+        -ac okhcModifiers2 top 0 okhcModifiersHeader
+        -ac okhcModifiers0 top 0 okhcModifiersHeader
+
+        -af okhcModifiers1 left 2
+        -ap okhcModifiers1 right 2 33
+
+        -ac okhcSep1 left 0 okhcModifiers1
+        -ac okhcSep1 right 4 okhcModifiers2
+
+        -ac okhcModifiers2 left 8 okhcModifiers1
+        -ap okhcModifiers2 right 2 66
+
+        -ac okhcSep2 left 0 okhcModifiers2
+        -ac okhcSep2 right 4 okhcModifiers0
+
+        -ac okhcModifiers0 left 8 okhcModifiers2
+        -af okhcModifiers0 right 2
+
+        okhcSettingsLayout;
+    setParent ..;
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Builds the HyperConnector Preconnection window
+//--------------------------------------------------------------------------------------------------------
+global proc okhcPreconWin_Build(int $rebuild) {
+
+
+    if (`window -exists okhcPreConWin`) {
+        if (!$rebuild)
+            return;
+        else
+        deleteUI okhcPreConWin;
+    }
+
+    window -title "HyperConnector" okhcPreConWin;
+
+    //paneLayout -ps 1 25 100 -cn "vertical2";
+    paneLayout -ps 1 25 100 -cn "vertical2";
+        frameLayout -bv 0 -lv 0 okhcAttrsLayout;
+            okhcAttributesWin_Build("okhcAttrsLayout");
+        setParent..;
+
+        formLayout okhcPreconWinMasterLayout;
+            paneLayout -cn "top3" -st 10 -aft 10 okhcLists;
+            textScrollList -ams 1
+                -dkc "okhcRemoveMarkedChannel $okhcSourceChannels `textScrollList -q -si okhcSourceChannelsList`"
+                okhcSourceChannelsList;
+            textScrollList -ams 1
+                -dkc "okhcRemoveMarkedChannel $okhcTargetChannels `textScrollList -q -si okhcTargetChannelsList`"
+                okhcTargetChannelsList;
+            textScrollList 
+				-ams 1
+				-dcc "string $chns[]=stringToStringArray(okGetFirst(`textScrollList -q -si okhcPreviewList`),\" ->\"); connectAttr -f $chns[0] $chns[1];"
+				 okhcPreviewList;
+			
+			popupMenu -p okhcSourceChannelsList -pmc "okhcPreconWin_BuildChanListPopup okhcSourceChannelsListPopup" okhcSourceChannelsListPopup;
+			popupMenu -p okhcTargetChannelsList -pmc "okhcPreconWin_BuildChanListPopup okhcTargetChannelsListPopup" okhcTargetChannelsListPopup;
+			popupMenu -p okhcPreviewList -pmc "okhcPreconWin_BuildPreviewListPopup okhcTargetChannelsListPopup" okhcPreviewListPopup;
+
+		setParent ..;
+			
+			rowLayout -nc 4 
+					-ct4 "both" "both" "both" "both" 
+					-cl4 "center" "center" "center" "center" 
+					okhcPreconButtons;
+		        button -l "Clear Lists" -bgc 1 .8 .8
+		            -c "okhcClearList $okhcSourceChannels; okhcClearList $okhcTargetChannels;";
+				button -l "Swap Lists" -bgc .9 .9 1 
+					-c "$chns = $okhcTargetChannels; $okhcTargetChannels = $okhcSourceChannels; $okhcSourceChannels = $chns; okhcPreconWin_Refresh();";
+		        button -l "Paste Values" -bgc .9 .9 1 
+					-c "okhcPasteValues" okhcPasteValuesBtn;
+	            button -l "Connect" -bgc .9 1 .9
+		            -c "okhcPreconWin_MakeConnections()" okhcMakeConnectionsBtn;
+			setParent ..;
+
+			frameLayout -l "Settings" -li 5 -la "center" -bs "etchedIn" okhcSettingsFrame;
+                okhcPreconWin_BuildSettingLayout();
+            setParent ..;
+
+
+        string $footer = okFooter("HyperConnector");
+    setParent ..;
+
+    formLayout -e
+            -af $footer bottom 0
+            -af $footer left 2
+            -af $footer right 2
+            -an $footer top
+
+            -af okhcPreconButtons right 2
+            -ac okhcPreconButtons bottom 2 $footer
+
+            -ac okhcSettingsFrame bottom 5 okhcPreconButtons
+            -af okhcSettingsFrame left 2
+            -af okhcSettingsFrame right 2
+
+            -af okhcLists left 2
+            -af okhcLists right 2
+            -af okhcLists top 5
+            -ac okhcLists bottom 5 okhcSettingsFrame
+
+            okhcPreconWinMasterLayout;
+
+/*      formLayout -e
+            -af okhcAttrsLayout "left" 2
+            -af okhcAttrsLayout "top" 0
+            -af okhcAttrsLayout "bottom" 0
+            -ap okhcAttrsLayout "right" 0 25
+            -ac okhcPreconWinMasterLayout "left" 5 okhcAttrsLayout
+            -af okhcPreconWinMasterLayout "top" 0
+            -af okhcPreconWinMasterLayout "bottom" 0
+            -af okhcPreconWinMasterLayout "right" 0
+            `setParent -q`;
+*/  setParent ..;
+
+    showWindow okhcPreConWin;
+
+    okhcPreconWin_Refresh();
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Make connections was called
+//--------------------------------------------------------------------------------------------------------
+global proc okhcPreconWin_MakeConnections() {
+    string $mod = `radioCollection -q -sl okhcModifierRadios`;
+    okhcMakeConnections(
+        `radioButton -q -l $mod`,
+        `radioButtonGrp -q -sl okhcOrderingRadios`-1,
+        `radioButtonGrp -q -sl okhcUseValueRadios`-1);
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Refresh the Preconnection window
+//--------------------------------------------------------------------------------------------------------
+
+proc okhcPreviewList_Add(string $from, string $to) { textScrollList -e -a ($from + "      ->     " + $to) okhcPreviewList; }
+proc okhcPreviewList_Clear() { textScrollList -e -removeAll okhcPreviewList; }
+
+global proc okhcPreconWin_Refresh() {
+
+    if (!`window -exists okhcPreConWin`)
+        return;
+
+    global string $okhcSourceChannels[];
+    global string $okhcTargetChannels[];
+
+    int $sequential = `radioButtonGrp -q -sl okhcOrderingRadios`-1;
+    int $useValue   = `radioButtonGrp -q -sl okhcUseValueRadios`-1;
+
+    int $sCount = size($okhcSourceChannels);
+    int $tCount = size($okhcTargetChannels);
+
+    if ($useValue) {
+        $sCount += $tCount;       // Each target chan has an extra incoming channel
+    }
+
+    columnLayout -e -en 0 okhcModifiers1;
+    columnLayout -e -en 0 okhcModifiers2;
+    columnLayout -e -en 0 okhcModifiers0;
+    button -e -en 0 okhcMakeConnectionsBtn;
+    button -e -en 0 okhcPasteValuesBtn;
+
+    string $m; string $selected[];
+
+	okhcPreviewList_Clear();
+	
+	// Store current selection, remove all, then restore selection
+	$selected = `textScrollList -q -si okhcSourceChannelsList`;
+	textScrollList -e -removeAll okhcSourceChannelsList;
+    for ($m in $okhcSourceChannels)
+        textScrollList -e -a $m okhcSourceChannelsList;
+    for ($m in $selected)
+        textScrollList -e -si $m okhcSourceChannelsList;
+
+	// Store current selection, remove all, then restore selection
+	$selected = `textScrollList -q -si okhcTargetChannelsList`;
+	textScrollList -e -removeAll okhcTargetChannelsList;
+    for ($m in $okhcTargetChannels)
+        textScrollList -e -a $m okhcTargetChannelsList;
+    for ($m in $selected)
+        textScrollList -e -si $m okhcTargetChannelsList;
+
+    if (!$sCount || !$tCount) {
+        return;
+    }
+
+    if (($sCount%$tCount!=0) && ($tCount%$sCount!=0)) {
+        okhcPreviewList_Add ("Number of source channels does not correspond with the number of target channels",sprintf("(%:%)",{(string)$sCount,(string)$tCount}));
+        return;
+    } else if ($sCount<=$tCount){
+        $sequential = true;
+        radioButtonGrp -e -en 0 -sl 2 okhcOrderingRadios;
+    } else
+        radioButtonGrp -e -en 1 okhcOrderingRadios;
+
+    int $j=0, $i=0, $k=0, $idx=0;
+    int $cycle = $sCount / $tCount;
+    for ($j=0;$j<$tCount;$j++) {
+
+        string $target = $okhcTargetChannels[$j];
+
+        if ($cycle==0) {
+            // 1-to-1 or 1-to-Many
+            okhcPreviewList_Add ($okhcSourceChannels[$j%$sCount]) $target;
+        } else {
+            // Many-to-1
+            for ($i=0; $i<$cycle; $i++) {
+
+                if ($sequential) {      // Sequential Sorting (a,b,A,B -> ab, AB)
+                    $k = $j*$cycle + $i;
+                    $idx = $k - ($k/$cycle) + ($useValue-1)-1;
+                } else {                // Respective Sorting   (a,b,A,B -> aA, bB)
+                    $k = $i*$tCount + $j;
+                    $idx = $k - (2-$useValue)*$tCount;
+                }
+
+                if ($useValue)
+                    if ($i%$cycle==($useValue-1)*($cycle-1)) {    // Check if index is even or odd against the $useValue method
+                         // Use Value
+                        okhcPreviewList_Add "#" $target;
+                    } else {
+                        // Use Channel
+                        okhcPreviewList_Add ($okhcSourceChannels[$idx]) $target;
+                    }
+                else {
+                    // By Channel Connection
+                    okhcPreviewList_Add ($okhcSourceChannels[$k]) $target;
+                }
+                if ($i==0)
+                    $target = "  *" + $target;
+            }
+        }
+    }
+
+    button -e -en 1 okhcMakeConnectionsBtn;
+
+    if ($tCount % $sCount==0) {
+        columnLayout -e -en 1 okhcModifiers1;
+        button -e -en 1 okhcPasteValuesBtn;
+    }
+    if ($sCount / $tCount==2) columnLayout -e -en 1 okhcModifiers2;
+    if ($sCount % $tCount==0) columnLayout -e -en 1 okhcModifiers0;
+
+    string $mod = `radioCollection -q -sl okhcModifierRadios`;
+    if (!`radioButton -q -en $mod`) {
+        for ($mod in `radioCollection -q -cia okhcModifierRadios`) {
+            if (`radioButton -q -en $mod`) {
+                radioButton -e -sl $mod;
+                button -e -l ("Connect ("+`radioButton -q -l $mod`+")") okhcMakeConnectionsBtn;
+                break;
+            }
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Builds the HyperConnector attributes window
+//--------------------------------------------------------------------------------------------------------
+global proc okhcAttributesWin_Build(string $parent) {
+
+    global string $okhcAttrFilters[];
+
+    if (`window -exists okhcAttrsWin`)
+        deleteUI okhcAttrsWin;
+    if (`stringArrayIntersector -ex okhcIntersector`)
+        deleteUI okhcIntersector;
+    if (`layout -q -ex okhcAttrsWinMasterLayout`) {
+        setParent okhcAttrsWinMasterLayout;
+        deleteUI `setParent ..`;
+        deleteUI okhcOutliner;
+        //deleteUI okhcAttrsWinMasterLayout;
+    }
+
+
+
+    if ($parent=="")
+        $parent = `window -title "HyperConnector" okhcAttrsWin`;
+
+    setParent $parent;
+
+    stringArrayIntersector okhcIntersector;
+
+    selectionConnection -p $parent -activeList okhcInputList;
+    selectionConnection -p $parent -as "okhcAttributesWin_SelectionChanged" -rs "okhcAttributesWin_SelectionChanged" okhcSelection;
+
+    formLayout -nd 100 okhcAttrsWinMasterLayout;
+
+        string $f;
+        for ($f in $okhcAttrFilters) {
+            checkBox -l $f -vis 0 -v 0 ("okhcFiltersCB_" + $f);
+        }
+
+        paneLayout -ps 1 100 10 -configuration "horizontal2" okhcPaneLayout;
+
+            formLayout -nd 100 okhcObjectsLayout;
+                text -l "Objects:" -font boldLabelFont -align left okhcObjHeader;
+                outlinerEditor -p okhcObjectsLayout -shp 1 -atr 1 -dag 0 -cmp 1 -xc 1 -xpd 0 -mlc okhcInputList -slc okhcSelection okhcOutliner;
+            formLayout -e
+                    -af okhcObjHeader left 0
+                    -af okhcObjHeader top 0
+                    -af okhcObjHeader right 0
+                    -an okhcObjHeader bottom
+
+                    -ac okhcOutliner top 5 okhcObjHeader
+                    -af okhcOutliner left 0
+                    -af okhcOutliner right 0
+                    -af okhcOutliner bottom 0
+                okhcObjectsLayout;
+            setParent okhcPaneLayout;
+
+            formLayout -nd 100 okhcChannelLayout;
+                rowLayout -numberOfColumns 2 -columnAlign 2 "right" -columnAttach2 "both" "both"
+                        -columnWidth 2 50 -adjustableColumn 1
+                    okhcRowLayout;
+                    text -l "Common Channels:" -font boldLabelFont -align left okhcChnHeader;
+                    button -w 20 -l  "Filters..." okhcFiltersButton;
+                setParent ..;
+                textScrollList -ann "List of attributes common to all selected nodes" -allowMultiSelection true okAttrsLst;
+            formLayout -e
+                    -af okhcRowLayout left 0
+                    -af okhcRowLayout top 0
+                    -af okhcRowLayout right 0
+                    -an okhcRowLayout bottom
+
+                    -ac okAttrsLst top 5 okhcRowLayout
+                    -af okAttrsLst left 0
+                    -af okAttrsLst right 0
+                    -af okAttrsLst bottom 0
+                okhcChannelLayout;
+            setParent okhcPaneLayout;
+
+        setParent okhcAttrsWinMasterLayout;
+
+        string $footer = (`objectTypeUI -i window $parent`) ? (okFooter("HyperConnector")) : `columnLayout -vis 0`;
+
+    popupMenu
+        -parent okAttrsLst
+        -pmc "okhcHCMenu_Build okhcAttrsLstPopupMenu"
+        okhcAttrsLstPopupMenu;
+/*    popupMenu
+        -parent okAttrsLst
+        -ctl 1
+        -pmc "okhcHCMenu_Build okhcAttrsLstPopupMenu2"
+        okhcAttrsLstPopupMenu2;
+*/    popupMenu -b 1
+        -parent okhcFiltersButton
+        -aob 1
+        -pmc "okhcFiltersMenu_Build"
+        okhcFiltersPopupMenu;
+
+
+    formLayout -e
+            -af okhcPaneLayout left 0
+            -af okhcPaneLayout right 0
+            -af okhcPaneLayout top 5
+                -ac okhcPaneLayout bottom 5 $footer
+
+                -af $footer bottom 0
+                -af $footer left 0
+                -af $footer right 0
+            okhcAttrsWinMasterLayout;
+        setParent ..;
+    setParent ..;
+
+
+    if (`objectTypeUI -i window $parent`)
+        showWindow $parent;
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Builds the main HyperConnector menu
+//--------------------------------------------------------------------------------------------------------
+global proc okhcHCMenu_Build(string $parent) {
+
+    global string $okhcLastModifierStr;
+    global string $okhcLastModifierCmd;
+    global string $okhcModifierNames[];
+
+    $parent = `setParent -m $parent`;       // dirty way to get the full pathname of the menu
+
+    popupMenu -e -dai $parent;
+
+        menuItem -l "Mark Source Channels" -bld 0
+            -c "okhcMarkChannels $okhcSourceChannels $okhcSelectedChannels 1"
+            -ann "Mark the selected channels for future operations"
+            okhcMarkSrcMenuItem;
+        menuItem -l "Mark Target Channels" -bld 0
+            -c "okhcMarkChannels $okhcTargetChannels $okhcSelectedChannels 1;okhcPreconWin_Build(0)"
+            -ann "Mark the selected channels as Targets for future operations"
+            okhcMarkTgtMenuItem;
+         menuItem -l "Connect" -bld 1
+            -c "okhcMarkChannels $okhcTargetChannels $okhcSelectedChannels 1; okhcMakeConnections Normal 0 0"
+            -ann "Connect marked channels with selected channels"
+            okhcMakeConMenuItem;
+
+        menuItem -d true;
+        menuItem -l "Add Source Channels"
+            -c "okhcMarkChannels $okhcSourceChannels $okhcSelectedChannels 0"
+            -ann "Add the selected channels to the list of marked channels"
+            okhcAddSrcMenuItem;
+        menuItem -l "Add Target Channels"
+            -c "okhcMarkChannels $okhcTargetChannels $okhcSelectedChannels 0; okhcPreconWin_Build(0)"
+            -ann "Add the selected channels to the list of target channels"
+            okhcAddTgtMenuItem;
+
+        menuItem -d true;
+        menuItem -l ("Connect (Normal)")
+            -ann "Connect marked channels with selected channels using last-used modifier"
+            okhcMakeLastConMenuItem;
+
+        menuItem -d true;
+        menuItem -l "Advanced Connections" -sm on
+            -pmc ("okhcHCMenu_BuildModifiersMenu \""+$parent+"|okhcModifiersMenuItem\" 0")
+            -ann "Indirect connections through calculation nodes"
+            okhcModifiersMenuItem;
+        setParent -m ..;
+
+        menuItem -d true;
+        menuItem -l "Marked Channels..." -bld 1
+            -c "okhcPreconWin_Build(1)"
+            -ann "Show the Pre-Connection window"
+            okhcPreConMenuItem;
+        setParent -m ..;
+
+
+        menuItem -d true;
+        menuItem -d true;
+        menuItem -l "Paste Channels"
+            -c "okhcCopyAttrs 0"
+            -ann "Paste the marked channels as new attributes"
+            okhcPasteMenuItem;
+        menuItem -l "Paste & Connect Channels"
+            -c "okhcCopyAttrs 1"
+            -ann "Paste the marked channels as new attributes and connect"
+            okhcPasteConnectMenuItem;
+        menuItem -l "Paste Connections"
+            -c "okhcMarkChannels $okhcTargetChannels $okhcSelectedChannels 1; okhcPasteConnections"
+            -ann "Connect the selected channels to the sources of the marked channels"
+            okhcPasteConnectionsMenuItem;
+        menuItem -l "Paste Values"
+            -c "okhcMarkChannels $okhcTargetChannels $okhcSelectedChannels 1; okhcPasteValues"
+            -ann "Paste the values of the marked channels"
+            okhcPasteValuesMenuItem;
+        menuItem -l "Print Values"
+            -c "okhcPrintValues()"
+            okhcPrintValuesMenuItem;
+
+        menuItem -d true;
+        menuItem -d true;
+        menuItem -l "Inputs" -sm on
+            -pmc ("okhcHCMenu_BuildIOMenu 0 \""+$parent+"|okhcInputsMenuItem\"")
+            okhcInputsMenuItem;
+        setParent -m ..;
+        menuItem -l "Outputs" -sm on
+            -pmc ("okhcHCMenu_BuildIOMenu 1 \""+$parent+"|okhcOutputsMenuItem\"")
+            okhcOutputsMenuItem;
+        setParent -m ..;
+        menuItem -d true;
+        menuItem -l "Modify Connection" -sm on
+            -pmc ("okhcHCMenu_BuildModifiersMenu \""+$parent+"|okhcModifyConnectionMenuItem\" 1")
+            -ann "Modify existing connections through calculation nodes"
+            okhcModifyConnectionMenuItem;
+        setParent -m ..;
+
+        menuItem -d true;
+
+        if (size(match("okhcPopupMenu",$parent))) {
+
+            menuItem -l "Unhide Channels..." -sm on
+                -pmc ("okhcHCMenu_BuildUnhideMenu \""+$parent+"|okhcUnhideChannelsMenuItem\"")
+                okhcUnhideChannelsMenuItem;
+            setParent -m ..;
+            menuItem -l "More Channels..." -bld 1
+                -c "okhcAttributesWin_Build(\"\")"
+                okhcShowAttrsWinMenuItem;
+            menuItem -d true;
+            menuItem -d true;
+            menuItem -l "HyperConnector" -bld 1 -en 0;
+            menuItem -l "by Ofer Koren (www.MrBroken.com)" -itl 1  -en 0;
+
+        } else {
+
+            if (`control -ex okAttrsLst`) {
+                string $selected[] = `textScrollList -q -si okAttrsLst`;
+                print $selected;
+                string $cmd="";
+                string $c;
+                // adding the menu items
+                for ($c in $selected) {
+                        $cmd = $cmd + "setAttr -k 1 \"." + $c + "\";";
+                }
+
+                menuItem -l "Unhide Selected" -c $cmd okhcUnhideChannelsMenuItem;
+            }
+        }
+
+        setParent -m ..;
+
+        okhcHCMenu_Refresh $parent;
+
+}
+
+
+//--------------------------------------------------------------------------------------------------------
+// Enable/Disable menu items of the main HyperConnector menu
+//--------------------------------------------------------------------------------------------------------
+global proc okhcHCMenu_Refresh(string $menu) {
+
+    global string $okhcSourceChannels[];
+    global string $okhcSelectedChannels[];
+
+    global string $okhcLastModifierStr;
+    global string $okhcLastModifierCmd;
+
+    global string $okhcModifierNames[];
+    global string $okhcActivePopupMenu;
+
+    $menu = `setParent -m $menu`;
+    $okhcActivePopupMenu = $menu;
+
+    if (match("okhcAttrsWin",$okhcActivePopupMenu)!="") {
+        string $chans[];
+        string $nodes[] = `selectionConnection -q -obj okhcSelection`;
+        string $attrs[] = `textScrollList -q -si okAttrsLst`;
+        for ($n in $nodes) {
+            //$n = okGetFirst(`ls -o $n`);  // Commented out to allow for component-level plugs
+            for ($a in $attrs)
+                $chans[size($chans)] = $n+"."+$a;
+        }
+        $okhcSelectedChannels = $chans;
+    } else
+        $okhcSelectedChannels = okGetSelectedChannels();
+
+    string $arr[];
+    int $count = size($okhcSourceChannels);
+
+    int $channelsSelected = (size($okhcSelectedChannels)>0);
+    int $channelsMarked = ($count > 0);
+
+
+
+    // Channels Selected AND Marked
+    $arr = {
+        "okhcMakeConMenuItem",
+        "okhcMakeLastConMenuItem",
+        "okhcModifiersMenuItem",
+        "okhcPasteConnectionsMenuItem",
+        "okhcPasteValuesMenuItem"};
+    for ($m in $arr)
+        menuItem -e -enable ($channelsSelected && $channelsMarked) $m;
+
+    // Channels Selected
+    $arr = {
+        "okhcAddSrcMenuItem",
+        "okhcMarkSrcMenuItem",
+        "okhcAddTgtMenuItem",
+        "okhcMarkTgtMenuItem",
+        "okhcPrintValuesMenuItem"
+        };
+    for ($m in $arr)
+        menuItem -e -enable $channelsSelected $m;
+
+    // Channels Marked
+    $arr = {
+        "okhcPreConMenuItem",
+        "okhcPasteMenuItem",
+        "okhcPasteConnectMenuItem"};
+    for ($m in $arr)
+        menuItem -e -enable $channelsMarked $m;
+
+    // Check if any of the selected channels is a source/destination of connections
+    int $isDriver = 0;
+    int $isDriven = 0;
+    if ($channelsSelected) {
+        for ($m in $okhcSelectedChannels) {
+            if (`connectionInfo -is $m`) {
+                $isDriver = 1;
+            }
+            if (`connectionInfo -id $m`) {
+                $isDriven = 1;
+            }
+            if ($isDriven && $isDriver)
+                break;
+        }
+    } else {
+        $isDriven = size(`ls -sl`) && (size(`listConnections -d 0`));
+        $isDriver = size(`ls -sl`) && (size(`listConnections -s 0`));
+    }
+
+    menuItem -e -enable $isDriver "okhcOutputsMenuItem";
+    menuItem -e -enable $isDriven "okhcInputsMenuItem";
+    menuItem -e -enable ($channelsSelected && $isDriven) "okhcModifyConnectionMenuItem";
+    menuItem -e -enable (size(`ls -sl`)) "okhcUnhideChannelsMenuItem";
+
+
+    // Update the Connect-with-Modifier menu item
+    menuItem -e -l ("Connect (" + $okhcLastModifierStr+ ")") 
+		-c ("okhcMarkChannels $okhcTargetChannels $okhcSelectedChannels 1; " + $okhcLastModifierCmd)
+            okhcMakeLastConMenuItem;
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Builds the inputs/outputs menu
+//--------------------------------------------------------------------------------------------------------
+global proc okhcHCMenu_BuildIOMenu(int $outputs, string $parent) {
+
+    global string $okhcSelectedChannels[];
+    global string $okhcIOChannelsList[];
+
+    string $srcChannels[];
+
+    string $dir = " -> ";
+    string $flagStr = "-s 1 -d 0 ";
+    string $nodesStr = "";
+
+    if ($outputs) {
+        $dir = " <- ";
+        $flagStr = "-s 0 -d 1 ";
+    }
+
+
+    setParent -m $parent;
+    menu -e -dai $parent;   // clean the menu
+
+        menuItem -l "Mark Source Channels"
+            -c "okhcMarkChannels $okhcSourceChannels $okhcIOChannelsList 1"
+            okhcMarkSrcMenuItem;
+        menuItem -l "Add Source Channels"
+            -c "okhcMarkChannels $okhcSourceChannels $okhcIOChannelsList 0"
+            okhcAddSrcMenuItem;
+        menuItem -d true;
+
+        menuItem -l "Mark Target Channels"
+            -c "okhcMarkChannels $okhcTargetChannels $okhcIOChannelsList 1;okhcPreconWin_Build(1)"
+            okhcMarkTgtMenuItem;
+        menuItem -l "Add Target Channels"
+            -c "okhcMarkChannels $okhcTargetChannels $okhcIOChannelsList 0;okhcPreconWin_Build(1)"
+            okhcAddTgtMenuItem;
+        menuItem -d true;
+
+    string $c;
+    clear($okhcIOChannelsList);
+
+    // listing the inputs/outputs
+    if (size($okhcSelectedChannels)) {          // Using SELECTED CHANNELS
+        $nodesStr = "$okhcSelectedChannels";
+        string $a;
+        for ($a in $okhcSelectedChannels) {
+            if ($outputs) {
+                string $io[] = `connectionInfo -dfs $a`;
+                for ($c in $io) {
+                    $okhcIOChannelsList[size($okhcIOChannelsList)] = $c;
+                    $srcChannels[size($srcChannels)] = $a;
+                }
+            } else {
+                $c = `connectionInfo -sfd $a`;
+                if ($c!="") {
+                    $okhcIOChannelsList[size($okhcIOChannelsList)] = $c;
+                    $srcChannels[size($srcChannels)] = $a;
+                }
+            }
+        }
+    } else {                                        // Using SELECTED NODES
+        string $io[];
+
+        $io = `listConnections -s (1-$outputs) -d ($outputs) -c 1 -p 1`;
+
+        int $i;
+        for ($i=0; $i<size($io); $i+=2) {
+            $okhcIOChannelsList[size($okhcIOChannelsList)] = $io[$i+1];
+            $srcChannels[size($srcChannels)] = $io[$i];
+        }
+    }
+
+    // adding the menu items
+    int $n = 0;
+    for ($c in $okhcIOChannelsList) {
+         menuItem -l ($c + $dir + $srcChannels[$n]) -c ("select " + okGetObjFromChannel($c));
+         $n++;
+        if ($n>15) {
+            menuItem -itl 1 -l ("(..." + (size($okhcIOChannelsList)-$n) + " more)");
+            break;
+        }
+    }
+
+
+    menuItem -d 1;
+    menuItem -l "Select All"
+        -c ("select `listConnections " + $flagStr + $nodesStr + "`")
+        okhcSelectIOMenuItem;
+    menuItem -l "Break Connections"
+        -c ("okhcBreakConnections "+$outputs)
+        okhcBreakIOMenuItem;
+
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Builds the Unhide menu
+//--------------------------------------------------------------------------------------------------------
+global proc okhcHCMenu_BuildUnhideMenu(string $parent) {
+
+    setParent -m $parent;
+    menu -e -dai $parent;   // clean the menu
+
+/*
+    menuItem -l "Unhide All"
+        -c ""
+        okhcUnhideAllMenuItem;
+    menuItem -d 1;
+
+    string $hidden[] = `listAttr -w -c -s -r -lf`;
+    //$hidden = stringArrayRemove(`listAttr -st "*X" -st "*Y" -st "*Z"`,$hidden);
+    $hidden = stringArrayRemove(`listAttr -k`,$hidden);
+    $hidden = stringArrayRemove(`listAttr -cb`,$hidden);
+    $hidden = stringArrayRemoveDuplicates(sort($hidden));
+
+*/
+
+    menuItem -l "[Locked]"
+        -c "okRunForArray(`listAttr -l`,\"setAttr -k 1 .%\")"
+        okhcUnhideAllMenuItem;
+
+	menuItem -d 1;
+
+	string $hiddenVectors[] = {"translate","rotate","scale","jointOrient","rotateAxis"};
+    // adding the menu items
+    for ($c in $hiddenVectors) {
+        menuItem -l $c
+            -c ("catchQuiet(`setAttr -k 1 \"." + $c + "X\"`);"+
+                "catchQuiet(`setAttr -k 1 \"." + $c + "Y\"`);"+
+                "catchQuiet(`setAttr -k 1 \"." + $c + "Z\"`);");
+    }
+
+	string $cmd;
+    // adding the menu items
+    for ($c in $hiddenVectors) {
+		$cmd = $cmd + 
+			   ("catchQuiet(`setAttr -k 1 \"." + $c + "X\"`);"+
+                "catchQuiet(`setAttr -k 1 \"." + $c + "Y\"`);"+
+                "catchQuiet(`setAttr -k 1 \"." + $c + "Z\"`);");
+    }
+	menuItem -l "[All]" -c $cmd;
+
+    menuItem -d 1;
+
+	string $hiddenSingles[] = {"visiblity","radius","objectColor","lockInfluenceWeights"};
+    // adding the menu items
+    for ($c in $hiddenSingles) {
+         menuItem -l $c -c ("catchQuiet(`setAttr -k 1 \"." + $c + "\"`)");
+    }
+	
+
+	string $cmd = "";
+    // adding the menu items
+    for ($c in $hiddenSingles) {
+		$cmd = $cmd + ("catchQuiet(`setAttr -k 1 \"." + $c + "\"`)");
+    }
+	menuItem -l "[All]" -c $cmd;
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Builds the Modified Connections submenu
+//--------------------------------------------------------------------------------------------------------
+global proc okhcHCMenu_BuildModifiersMenu(string $parent,int $asModifyConnections) {
+
+    global string $okhcModifiers[];
+    global string $okhcLastModifierStr;
+
+    setParent -m $parent;
+
+
+    if (`menu -q -ni $parent`==0) {
+        int $i=0; int $first=0;
+        string $cmd = "okhcMarkChannels $okhcTargetChannels $okhcSelectedChannels 1;";
+
+        if ($asModifyConnections) {
+            $first=1;       // Skip 'Normal'
+            $cmd += "okhcModifyConnections";
+        } else
+			$cmd += "okhcMakeConnections";
+
+        $i=$first;
+        do {
+            if ($okhcModifiers[$i*3+1]==1) {
+                menuItem
+                    -l ($okhcModifiers[$i*3])
+                    -c ($cmd + " " + $okhcModifiers[$i*3] + " 0 0");
+            }
+            $i++;
+        } while (($i*3)<size($okhcModifiers));
+
+        menuItem -d 1;
+        $i=$first;
+        do {
+            if (int($okhcModifiers[$i*3+1])!=1) {
+                menuItem
+                    -l ($okhcModifiers[$i*3] + " (Seq)")
+                    -c ($cmd + " " + $okhcModifiers[$i*3] + " 1 0");
+                menuItem
+                    -l ($okhcModifiers[$i*3] + " (Res)")
+                    -c ($cmd + " " + $okhcModifiers[$i*3] + " 0 0");
+            }
+            $i++;
+        } while (($i*3)<size($okhcModifiers));
+
+    }
+}
+
+//--------------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------------
+//  Callback procedures
+//--------------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------------
+
+
+
+
+//--------------------------------------------------------------------------------------------------------
+// Set selected channels as connection sources list
+//--------------------------------------------------------------------------------------------------------
+global proc okhcMarkChannels(string $list[], string $channels[], int $replace) {
+
+    if ($replace)
+        $list = $channels;
+    else
+        appendStringArray $list $channels (size($channels));
+    println("Currently Marked Channels:");
+    print($list);
+
+    okhcPreconWin_Refresh();
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Remove a channel from connection sources list
+//--------------------------------------------------------------------------------------------------------
+global proc okhcRemoveMarkedChannel(string $list[], string $channels[]) {
+
+    $list = `stringArrayRemoveExact $channels $list`;
+
+    println("Set connection from channel(s):");
+    print($list);
+
+    okhcPreconWin_Refresh();
+
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Clear connection Sources list
+//--------------------------------------------------------------------------------------------------------
+global proc okhcClearList(string $list[]) {
+    clear($list);
+    println("Channel List cleared");
+    print($list);
+    okhcPreconWin_Refresh();
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Make the connections between sources list and the selected channels
+//--------------------------------------------------------------------------------------------------------
+global proc okhcMakeConnections(string $modifier, int $sequential, int $useValue) {
+
+    global string $okhcSourceChannels[];
+    global string $okhcTargetChannels[];
+    global string $okhcSelectedChannels[];
+    global string $okhcModifiers[];
+    global string $okhcLastModifierCmd;
+    global string $okhcLastModifierStr;
+
+    int $m=0;
+    for ($m=0; $m<size($okhcModifiers) && ($okhcModifiers[$m]!=$modifier); $m+=3);
+
+    if ($m>=size($okhcModifiers))
+        error ("Invalid modifier specified - " + $modifier);
+
+    if (!size($okhcTargetChannels))
+        $okhcTargetChannels = $okhcSelectedChannels;
+
+    string $cmd = $okhcModifiers[$m+2];
+
+    float $value = 0;
+    if (($useValue && size(match("%useval%",$cmd))) ||
+        (size(match("%val%",$cmd))) && !size(match("%useval%",$cmd)) ) { // a value is needed
+        string $res = okPrompt("Please specifiy a value:","1","##");
+        if ($res!="##") {
+            $value = (float) $res;
+        } else
+            return;
+    }
+
+    $cmd = `substitute "%src%"      $cmd "$okhcSourceChannels"`;
+    $cmd = `substitute "%tgt%"      $cmd "$okhcTargetChannels"`;
+    $cmd = `substitute "%seq%"      $cmd ((string) $sequential)`;
+    $cmd = `substitute "%useval%"   $cmd ((string) $useValue)`;
+    $cmd = `substitute "%val%"      $cmd ((string) $value)`;
+
+    eval $cmd;
+    $okhcLastModifierCmd = $cmd;
+    $okhcLastModifierStr = $modifier;
+    okhcPreconWin_Refresh();
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Make the connections between sources list and the selected channels
+//--------------------------------------------------------------------------------------------------------
+global proc okhcModifyConnections(string $modifier, int $sequential, int $useValue) {
+    global string $okhcSelectedChannels[];
+    global string $okhcSourceChannels[];
+
+    // save marked channels
+    string $currentlyMarked[] = $okhcSourceChannels;
+
+    clear($okhcSourceChannels);
+
+    for ($c in $okhcSelectedChannels) {
+        $c = `connectionInfo -sfd $c`;
+        $c = `connectionInfo -ges $c`;
+        $okhcSourceChannels[size($okhcSourceChannels)] = $c;
+    }
+
+    okhcMakeConnections $modifier $sequential $useValue;
+
+    // restore marked channels
+    $okhcSourceChannels = $currentlyMarked;
+}
+
+
+//--------------------------------------------------------------------------------------------------------
+// Print values of selected channels
+//--------------------------------------------------------------------------------------------------------
+global proc okhcPrintValues() {
+    global string $okhcSelectedChannels[];
+    global string $okhcTargetChannels[];
+
+    okRunForArray($okhcSelectedChannels,"println \"%:\"; print (`getAttr %`); print \"\\n\"");
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Copy marked channels to selected object
+// connect the new attributes into the old ones if requested
+//--------------------------------------------------------------------------------------------------------
+global proc okhcCopyAttrs(int $connect) {
+    global string $okhcSourceChannels[];
+    okcnCopyAttrs $okhcSourceChannels `ls -sl` $connect;
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Connect the selected channels to the drivers of the marked channels
+// Essentially duplicate the connection to another channel
+// A->B, A is marked, C is selected =>  A->B, A->C.
+//--------------------------------------------------------------------------------------------------------
+global proc okhcPasteConnections() {
+    global string $okhcSourceChannels[];
+    global string $okhcSelectedChannels[];
+    global string $okhcTargetChannels[];
+
+    if (!size($okhcTargetChannels))
+        $okhcTargetChannels = $okhcSelectedChannels;
+
+    string $tChans[] = $okhcTargetChannels;
+    string $sChans[];
+    for ($a in $okhcSourceChannels) {
+        $sChans[size($sChans)] = `connectionInfo -sfd $a`;
+    }
+
+    int $i=0; int $j=0;
+    int $sCount = size($sChans);
+    int $tCount = size($tChans);
+
+    if ($tCount%$sCount!=0)
+        error(sprintf("Number of source channels does not correspond with the number of target channels (%:%)",{(string)$sCount,(string)$tCount}));
+
+    for ($i=0; $i<size($tChans); $i++) {
+        if ($sChans[$i%$sCount]!="") {
+            connectAttr -f $sChans[$i%$sCount] $tChans[$i];
+            sprint("Connected: % -> %",{$sChans[$i%$sCount],$tChans[$i%$sCount]});
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Paste the values of the marked channels to the selected channels
+//--------------------------------------------------------------------------------------------------------
+global proc okhcPasteValues() {
+    global string $okhcSourceChannels[];
+    global string $okhcSelectedChannels[];
+
+    int $i=0; int $j=0;
+    int $sCount = size($okhcSourceChannels);
+    int $tCount = size($okhcSelectedChannels);
+
+    if ($tCount%$sCount!=0)
+        error(sprintf("Number of source channels does not correspond with the number of target channels (%:%)",{(string)$sCount,(string)$tCount}));
+
+    for ($i=0; $i<size($okhcSelectedChannels); $i++) {
+        // Avoid declaring the variable tyoe so that we get whatever comes from the getAttr command
+        if (catchQuiet(eval("setAttr $okhcSelectedChannels["+$i+"] `getAttr $okhcSourceChannels["+$i%$sCount+"]`")))
+            warning(sprintf("Channel Locked: % - Skipping...",{$okhcSelectedChannels[$i]}));
+        else
+            sprint("Value copied: % -[%]-> %",{$okhcSourceChannels[$i%$sCount],
+                                                (string) `getAttr $okhcSourceChannels[$i%$sCount]`,
+                                                $okhcSelectedChannels[$i%$sCount]});
+    }
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Break the connection from the selected channels to all its dependents
+//--------------------------------------------------------------------------------------------------------
+global proc okhcBreakConnections(int $outputs) {
+    global string $okhcSelectedChannels[];
+
+    string $channels[] = $okhcSelectedChannels;
+    if (!size($channels)) {
+        $channels = `listConnections -s (1-$outputs) -d ($outputs) -p 1`;
+        $outputs = 1-$outputs;
+    }
+
+    string $t; string $s; string $c;
+
+    for ($c in $channels) {
+        if ($outputs) {
+            string $tChans[] = `connectionInfo -dfs $c`;
+            for ($t in $tChans) {
+                CBdeleteConnection $t;
+                sprint("Disconnected % -x-> %", {$c,$t});
+            }
+        } else {
+            $s = `connectionInfo -sfd $c`;
+            CBdeleteConnection $c;
+            sprint("Connection broken: % -x-> %", {$s,$c});
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Load the HyperConnector
+//--------------------------------------------------------------------------------------------------------
+
+global proc OK_hyperConnector() {
+    if( !`exists OK_utils` )
+        source OK_utils;
+
+    if( !`exists OK_manageConnections` )
+        source OK_manageConnections;
+
+    if( !`exists OK_connections` )
+        source OK_connections;
+
+    okhcInitialize();
+};
+OK_hyperConnector();
