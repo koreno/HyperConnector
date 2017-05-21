@@ -9,7 +9,7 @@ This script creates the HyperConnector popup-menus in the channel-box. Access by
 ## INSTALLATION:
 Call "OK_hyperConnector" from the command script, or add the following to your userSetup.mel script:
 
-    `source OK_hyperConnector;`
+    source OK_hyperConnector;
 
 This script requires OK_utils.mel, OK_manageConnections.mel, OK_connections.mel
 
